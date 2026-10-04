@@ -1,0 +1,63 @@
+name: ahmadia_shop
+description: "Ahmadia Shop — সম্পূর্ণ দোকান ব্যবস্থাপনা অ্যাপ (অফলাইন, FIFO হিসাব)"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+
+  # লোকাল ডাটাবেস
+  sqflite: ^2.3.0
+  path: ^1.8.3
+  path_provider: ^2.1.1
+
+  # স্টেট ম্যানেজমেন্ট
+  provider: ^6.1.1
+
+  # PDF ইনভয়েস/রিপোর্ট তৈরি
+  pdf: ^3.10.7
+  printing: ^5.11.1
+
+  # Excel এক্সপোর্ট
+  excel: ^4.0.2
+
+  # গ্রাফ/চার্ট
+  fl_chart: ^0.66.0
+
+  # তারিখ ফরম্যাট
+  intl: ^0.18.1
+
+  # পাসওয়ার্ড হ্যাশিং (নিরাপত্তা)
+  crypto: ^3.0.3
+
+  # ব্যাকআপ ফাইল এনক্রিপশন
+  encrypt: ^5.0.3
+
+  # ফাইল শেয়ার/সেভ (ব্যাকআপ শেয়ার-শিটের মাধ্যমে Google Drive/অন্য অ্যাপে পাঠাতে)
+  share_plus: ^7.2.1
+  file_picker: ^6.1.1
+
+  # হোয়াটসঅ্যাপ/URL লঞ্চ করা
+  url_launcher: ^6.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/fonts/
+  fonts:
+    - family: NotoSansBengali
+      fonts:
+        - asset: assets/fonts/NotoSansBengali-Regular.ttf
+        - asset: assets/fonts/NotoSansBengali-Bold.ttf
+          weight: 700
