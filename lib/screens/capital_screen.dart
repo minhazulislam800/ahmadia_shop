@@ -177,7 +177,7 @@ class _CapitalScreenState extends State<CapitalScreen> {
               await Navigator.push(
                   context,
                   MaterialPageRoute(
-                      builder: (_) => const CapitalHistoryScreen()));
+                      builder: (_) => CapitalHistoryScreen(currentUser: widget.currentUser)));
               _load();
             },
           ),
@@ -255,6 +255,7 @@ class _CapitalScreenState extends State<CapitalScreen> {
                                     context,
                                     MaterialPageRoute(
                                         builder: (_) => CapitalHistoryScreen(
+                                            currentUser: widget.currentUser,
                                             partnerId: p['id'] as int))),
                                 icon: const Icon(Icons.history_rounded),
                                 label: const Text('হিস্টোরি'),

@@ -327,6 +327,113 @@ class TransactionService {
   }
 
   // ----------------------------------------------------------
+  // খরচ এডিট — ক্যাশ লেজারের সংশ্লিষ্ট এন্ট্রিও একসাথে নতুন মানে বদলায়
+  // (একই transaction-এ, তাই মাঝপথে হিসাব ভাঙে না)
+  // ----------------------------------------------------------
+  Future<void> editExpense({
+    required int expenseId,
+    required String category,
+    required double amount,
+    required String? description,
+    required String expenseDate,
+    required int? editedBy,
+  }) async {
+    final db = await _dbHelper.database;
+    await db.transaction((txn) async {
+      final rows =
+          await txn.query('expenses', where: 'id = ?', whereArgs: [expenseId]);
+      if (rows.isEmpty) throw Exception('খরচ খুঁজে পাওয়া যায়নি');
+      final old = rows.first;
+
+      await txn.update(
+          'expenses',
+          {
+            'category': category,
+            'amount': amount,
+            'description': description,
+            'expense_date': expenseDate,
+          },
+          where: 'id = ?',
+          whereArgs: [expenseId]);
+
+      await txn.delete('cash_ledger',
+          where: "reference_type = 'expense' AND reference_id = ?",
+          whereArgs: [expenseId]);
+      await _addCashLedger(txn, amount, 'out', 'expense', expenseId, category,
+          expenseDate,
+          refSyncId: old['sync_id'] as String?);
+
+      await _logActivity(
+          txn,
+          editedBy,
+          'update',
+          'expense',
+          expenseId,
+          'আগে: ${old['category']} ${old['amount']} (${old['expense_date']}) → এখন: $category $amount ($expenseDate)');
+    });
+  }
+
+  // ----------------------------------------------------------
+  // মূলধন/উত্তোলন এন্ট্রি এডিট — ধরন, পরিমাণ, তারিখ, নোট বদলানো যায়;
+  // ক্যাশ লেজারও একই সাথে নতুন মানে বদলায়
+  // ----------------------------------------------------------
+  Future<void> editCapitalTransaction({
+    required int transactionId,
+    required String type, // invest / withdraw_capital / withdraw_profit
+    required double amount,
+    required String date,
+    String? note,
+    required int? editedBy,
+  }) async {
+    final db = await _dbHelper.database;
+    await db.transaction((txn) async {
+      final rows = await txn.query('capital_transactions',
+          where: 'id = ?', whereArgs: [transactionId]);
+      if (rows.isEmpty) throw Exception('এন্ট্রি খুঁজে পাওয়া যায়নি');
+      final old = rows.first;
+
+      await txn.update(
+          'capital_transactions',
+          {
+            'type': type,
+            'amount': amount,
+            'transaction_date': date,
+            'note': note,
+          },
+          where: 'id = ?',
+          whereArgs: [transactionId]);
+
+      await txn.delete('cash_ledger',
+          where: "reference_type = 'capital' AND reference_id = ?",
+          whereArgs: [transactionId]);
+      final refSync = old['sync_id'] as String?;
+      if (type == 'invest') {
+        await _addCashLedger(txn, amount, 'in', 'capital', transactionId,
+            'পার্টনার বিনিয়োগ', date,
+            refSyncId: refSync);
+      } else {
+        await _addCashLedger(
+            txn,
+            amount,
+            'out',
+            'capital',
+            transactionId,
+            type == 'withdraw_profit' ? 'লাভ উত্তোলন' : 'মূলধন উত্তোলন',
+            date,
+            refSyncId: refSync);
+      }
+
+      await _logActivity(
+          txn,
+          editedBy,
+          'update',
+          'capital_transaction',
+          transactionId,
+          'আগে: ${old['type']} ${old['amount']} (${old['transaction_date']}) → এখন: $type $amount ($date)');
+    });
+  }
+
+  // ----------------------------------------------------------
   // বাকি আদায়/শোধ
   // ----------------------------------------------------------
   Future<int> recordDuePayment({
@@ -461,6 +568,122 @@ class TransactionService {
           'stock_adjustment', id, '$reason: $quantity, মূল্য: $totalCost ($note)');
 
       return id;
+    });
+  }
+
+  // ----------------------------------------------------------
+  // স্টক সমন্বয় এডিট — কারণ, নোট, তারিখ ও পরিমাণ বদলানো যায়
+  // (পণ্য ও স্টক কমবে/বাড়বে — এই দিক বদলানো যায় না; উল্টোটা লাগলে
+  // নতুন এন্ট্রি দিন)। পরিমাণ বদলালে শুধু পার্থক্যটুকু স্টকে প্রয়োগ হয়:
+  //   • ক্ষতি বাড়লে → বাড়তি অংশ FIFO অনুযায়ী আরও কাটা হয়
+  //   • ক্ষতি কমলে  → ফেরত অংশ আগের গড় দামে নতুন ব্যাচ হিসেবে স্টকে ফেরে
+  //   • "অতিরিক্ত পাওয়া" বাড়লে → আগের একক-দামে নতুন ব্যাচ; কমলে FIFO থেকে কাটা
+  // total_cost সবসময় স্টকের মূল্য-পরিবর্তনের সাথে মিলিয়ে বদলায়, তাই
+  // ইনভেন্টরি ও লাভ-ক্ষতির হিসাব মিলে থাকে।
+  // ----------------------------------------------------------
+  Future<void> editStockAdjustment({
+    required int adjustmentId,
+    required double newQuantityAbs, // ধনাত্মক সংখ্যা, একই unit-এ (দিক আগেরটাই থাকবে)
+    required String reason,
+    String? note,
+    required String date,
+    required int? editedBy,
+  }) async {
+    if (newQuantityAbs <= 0) throw Exception('সঠিক পরিমাণ দিন');
+    final db = await _dbHelper.database;
+    await db.transaction((txn) async {
+      final rows = await txn.query('stock_adjustments',
+          where: 'id = ?', whereArgs: [adjustmentId]);
+      if (rows.isEmpty) throw Exception('এন্ট্রি খুঁজে পাওয়া যায়নি');
+      final old = rows.first;
+      final productId = old['product_id'] as int;
+      final productUnitId = old['product_unit_id'] as int?;
+      final oldBase = (old['base_quantity'] as num).toDouble();
+      final oldCost = (old['total_cost'] as num?)?.toDouble() ?? 0;
+      final isLoss = oldBase < 0;
+
+      final factor = await _conversionFactorFor(txn, productUnitId);
+      final newSigned = isLoss ? -newQuantityAbs : newQuantityAbs;
+      final newBase = QuantityMath.toBase(newSigned, factor);
+      final deltaBase = QuantityMath.round(newBase - oldBase);
+      var newCost = oldCost;
+
+      Future<double> consumeFifo(double qty) async {
+        var cost = 0.0;
+        final allocations = await _dbHelper.allocateFIFO(txn, productId, qty);
+        for (final alloc in allocations) {
+          cost += QuantityMath.round((alloc['quantity'] as double) *
+              (alloc['unit_cost'] as num).toDouble());
+          final batch = (await txn.query('purchase_batches',
+                  where: 'id = ?', whereArgs: [alloc['batch_id']]))
+              .first;
+          await txn.update(
+              'purchase_batches',
+              {
+                'remaining_quantity': QuantityMath.subtract(
+                    (batch['remaining_quantity'] as num).toDouble(),
+                    (alloc['quantity'] as double))
+              },
+              where: 'id = ?',
+              whereArgs: [alloc['batch_id']]);
+        }
+        return cost;
+      }
+
+      Future<void> addBatch(double qty, double unitCost) async {
+        await txn.insert('purchase_batches', {
+          'purchase_id': null,
+          'product_id': productId,
+          'quantity': qty,
+          'remaining_quantity': qty,
+          'unit_cost': unitCost,
+          'batch_date': date,
+          'sync_id': generateSyncId(),
+        });
+      }
+
+      if (deltaBase.abs() > 0.0000001) {
+        final avgUnitCost = oldBase.abs() > 0 ? oldCost / oldBase.abs() : 0.0;
+        if (isLoss) {
+          if (deltaBase < 0) {
+            // ক্ষতি বাড়ল — বাড়তি অংশ আরও কাটা (পর্যাপ্ত স্টক না থাকলে Exception)
+            newCost = oldCost + await consumeFifo(-deltaBase);
+          } else {
+            await addBatch(deltaBase, avgUnitCost);
+            newCost = oldCost - QuantityMath.round(deltaBase * avgUnitCost);
+          }
+        } else {
+          if (deltaBase > 0) {
+            await addBatch(deltaBase, avgUnitCost);
+            newCost = oldCost + QuantityMath.round(deltaBase * avgUnitCost);
+          } else {
+            final removed = await consumeFifo(-deltaBase);
+            newCost = oldCost - removed;
+          }
+        }
+        if (newCost < 0) newCost = 0;
+      }
+
+      await txn.update(
+          'stock_adjustments',
+          {
+            'quantity': newSigned,
+            'base_quantity': newBase,
+            'total_cost': newCost,
+            'reason': reason,
+            'note': note,
+            'adjustment_date': date,
+          },
+          where: 'id = ?',
+          whereArgs: [adjustmentId]);
+
+      await _logActivity(
+          txn,
+          editedBy,
+          'update',
+          'stock_adjustment',
+          adjustmentId,
+          'আগে: ${old['reason']} ${old['quantity']} (মূল্য ${old['total_cost']}, ${old['adjustment_date']}) → এখন: $reason $newSigned (মূল্য $newCost, $date)');
     });
   }
 

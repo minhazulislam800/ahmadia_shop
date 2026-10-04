@@ -9,10 +9,11 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
+import '../utils/safe_share.dart';
 import 'package:excel/excel.dart' as excel_lib;
 import '../database/db_helper.dart';
 import '../utils/app_theme.dart';
+import '../utils/full_export.dart';
 import '../utils/report_pdf.dart';
 import 'transaction_report_screen.dart';
 import 'year_end_summary_screen.dart';
@@ -159,7 +160,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
     final dir = await getTemporaryDirectory();
     final file = File('${dir.path}/inventory_report.pdf');
     await file.writeAsBytes(bytes);
-    await Share.shareXFiles([XFile(file.path)], text: 'ইনভেন্টরি রিপোর্ট');
+    await SafeShare.files([file.path], text: 'ইনভেন্টরি রিপোর্ট');
   }
 
   Future<void> _exportInventoryExcel() async {
@@ -179,7 +180,30 @@ class _ReportsScreenState extends State<ReportsScreen> {
     final dir = await getTemporaryDirectory();
     final file = File('${dir.path}/inventory_report.xlsx');
     await file.writeAsBytes(bytes);
-    await Share.shareXFiles([XFile(file.path)], text: 'ইনভেন্টরি রিপোর্ট (Excel)');
+    await SafeShare.files([file.path], text: 'ইনভেন্টরি রিপোর্ট (Excel)');
+  }
+
+  bool _exportingAll = false;
+
+  // অ্যাপের সব তথ্য একটা Excel ওয়ার্কবুকে (প্রতি বিষয়ের আলাদা শিট)
+  Future<void> _exportEverything() async {
+    if (_exportingAll) return;
+    setState(() => _exportingAll = true);
+    try {
+      final bytes = await FullExport.build();
+      if (bytes == null) throw Exception('ফাইল তৈরি করা যায়নি');
+      final dir = await getTemporaryDirectory();
+      final stamp = DateFormat('yyyy-MM-dd_HH-mm').format(DateTime.now());
+      final file = File('${dir.path}/AhmadiaShop_সব_তথ্য_$stamp.xlsx');
+      await file.writeAsBytes(bytes);
+      await SafeShare.files([file.path], text: 'Ahmadia Shop — সব তথ্য (Excel)');
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('এক্সপোর্ট ব্যর্থ: $e')));
+    } finally {
+      if (mounted) setState(() => _exportingAll = false);
+    }
   }
 
   @override
@@ -192,6 +216,24 @@ class _ReportsScreenState extends State<ReportsScreen> {
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
+                Card(
+                  child: ListTile(
+                    leading: _exportingAll
+                        ? const SizedBox(
+                            width: 24,
+                            height: 24,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.download_for_offline_outlined,
+                            color: AppColors.primary),
+                    title: const Text('সব তথ্য Excel-এ এক্সপোর্ট',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                    subtitle: const Text(
+                        'বিক্রয়, ক্রয়, খরচ, মূলধন, কাস্টমার, পণ্য, স্টক, ক্যাশ — সব একটা ফাইলে, প্রতিটার আলাদা শিটে'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: _exportingAll ? null : _exportEverything,
+                  ),
+                ),
+                const SizedBox(height: 8),
                 Card(
                   color: AppColors.primaryLight,
                   child: ListTile(

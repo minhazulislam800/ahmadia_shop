@@ -70,6 +70,97 @@ class _StockAdjustmentScreenState extends State<StockAdjustmentScreen> {
     _load();
   }
 
+  // এন্ট্রি এডিট: কারণ, পরিমাণ, তারিখ, নোট বদলানো যায়। পণ্য ও স্টক
+  // কমবে/বাড়বে — এই দিক বদলানো যায় না (উল্টোটা লাগলে নতুন এন্ট্রি দিন)
+  Future<void> _showEditDialog(Map<String, dynamic> a) async {
+    final qtySigned = (a['quantity'] as num).toDouble();
+    final isLoss = (a['base_quantity'] as num).toDouble() < 0;
+    final unitLabel =
+        (a['pack_unit_label'] as String?) ?? (a['base_unit'] as String);
+    final options = _reasonOptions
+        .where((r) => r.decreasesStock == null || r.decreasesStock == isLoss)
+        .toList();
+    var reason = options.any((r) => r.value == a['reason'])
+        ? a['reason'] as String
+        : options.first.value;
+    final qtyController = TextEditingController(
+        text: qtySigned.abs().toString().replaceFirst(RegExp(r'\.0$'), ''));
+    final noteController = TextEditingController(text: a['note'] as String? ?? '');
+    DateTime date = DateTime.tryParse(a['adjustment_date'] as String) ?? DateTime.now();
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text('${a['product_name']} — সম্পাদনা'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(isLoss ? 'স্টক কমেছে (ক্ষতি/ব্যবহার)' : 'স্টক বেড়েছে (অতিরিক্ত পাওয়া)',
+                    style: const TextStyle(color: AppColors.textSecondary)),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  value: reason,
+                  decoration: const InputDecoration(labelText: 'কারণ'),
+                  items: options
+                      .map((r) => DropdownMenuItem(value: r.value, child: Text(r.label)))
+                      .toList(),
+                  onChanged: (v) => setDialogState(() => reason = v!),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: qtyController,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(labelText: 'পরিমাণ ($unitLabel)'),
+                ),
+                const SizedBox(height: 12),
+                DateField(
+                  date: date,
+                  onChanged: (d) => setDialogState(() => date = d),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: noteController,
+                  decoration: const InputDecoration(labelText: 'নোট (ঐচ্ছিক)'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('বাতিল')),
+            ElevatedButton(
+              onPressed: () async {
+                final qty = double.tryParse(qtyController.text) ?? 0;
+                if (qty <= 0) return;
+                try {
+                  await _transactionService.editStockAdjustment(
+                    adjustmentId: a['id'] as int,
+                    newQuantityAbs: qty,
+                    reason: reason,
+                    note: noteController.text.trim(),
+                    date: DateFormat('yyyy-MM-dd').format(date),
+                    editedBy: widget.currentUser['id'] as int?,
+                  );
+                  if (!ctx.mounted) return;
+                  Navigator.pop(ctx);
+                  _load();
+                } catch (e) {
+                  if (!ctx.mounted) return;
+                  ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+                      content: Text(
+                          '$e'.replaceFirst('Exception: ', ''))));
+                }
+              },
+              child: const Text('সংরক্ষণ করুন'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _load() async {
     final db = await _dbHelper.database;
     final products = await db.rawQuery('''
@@ -347,16 +438,24 @@ class _StockAdjustmentScreenState extends State<StockAdjustmentScreen> {
                       margin: const EdgeInsets.only(bottom: 8),
                       child: ListTile(
                         dense: true,
+                        onTap: () => _showEditDialog(a),
                         title: Text('${a['product_name']} — $reasonLabel'),
                         subtitle: Text(
                             '${qty > 0 ? "+" : ""}$qty $label • ${a['adjustment_date']}'
                             '${a['created_by_name'] != null ? " • ${a['created_by_name']}" : ""}'
                             '${(a['note'] as String?)?.isNotEmpty == true ? "\n${a['note']}" : ""}'),
-                        trailing: cost != 0
-                            ? Text(_currencyFormat.format(cost),
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w600))
-                            : null,
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (cost != 0)
+                              Text(_currencyFormat.format(cost),
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w600)),
+                            const SizedBox(width: 4),
+                            const Icon(Icons.edit_outlined,
+                                size: 16, color: AppColors.textSecondary),
+                          ],
+                        ),
                         isThreeLine: (a['note'] as String?)?.isNotEmpty == true,
                       ),
                     );

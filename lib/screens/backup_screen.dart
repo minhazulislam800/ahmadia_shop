@@ -8,7 +8,7 @@
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:share_plus/share_plus.dart';
+import '../utils/safe_share.dart';
 import '../database/auth_service.dart';
 import '../database/backup_service.dart';
 import '../database/merge_service.dart';
@@ -127,7 +127,7 @@ class _BackupScreenState extends State<BackupScreen> {
       await _loadLastBackupTime();
       // Android শেয়ার-শিট খুলবে — এখান থেকে Google Drive, WhatsApp,
       // ফাইল ম্যানেজার (ফোন স্টোরেজে সেভ), বা যেকোনো অ্যাপ বেছে নেওয়া যাবে
-      await Share.shareXFiles([XFile(path)],
+      await SafeShare.files([path],
           text: 'Ahmadia Shop ব্যাকআপ ফাইল — নিরাপদ জায়গায় সংরক্ষণ করুন');
     } catch (e) {
       if (!mounted) return;

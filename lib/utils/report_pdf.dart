@@ -48,11 +48,13 @@ class ReportTable extends ReportBlock {
   final List<List<String>> rows;
   final List<double> flex;
   final List<bool> rightAlign;
+  final Set<int> boldRows; // এই নম্বরের সারিগুলো গাঢ় (bold) অক্ষরে — যেমন বিলের মোট
   const ReportTable({
     required this.headers,
     required this.rows,
     required this.flex,
     required this.rightAlign,
+    this.boldRows = const {},
   });
 }
 
@@ -224,6 +226,7 @@ class ReportPdf {
             final text = i < row.length ? row[i] : '';
             final p = _painter(text,
                 size: 10.5,
+                bold: block.boldRows.contains(r),
                 width: widths[i] - 12,
                 right: block.rightAlign[i],
                 maxLines: 3);

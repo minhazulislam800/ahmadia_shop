@@ -54,17 +54,30 @@ class _ExpenseScreenState extends State<ExpenseScreen> {
     });
   }
 
-  Future<void> _showAddDialog() async {
-    String category = kExpenseCategories.first;
-    final amountController = TextEditingController();
-    final descController = TextEditingController();
-    DateTime date = DateTime.now();
+  // existing != null হলে এডিট মোড (আগের মান বসানো থাকে), নাহলে নতুন খরচ
+  Future<void> _showAddDialog({Map<String, dynamic>? existing}) async {
+    final isEdit = existing != null;
+    String category =
+        isEdit ? existing!['category'] as String : kExpenseCategories.first;
+    final amountController = TextEditingController(
+        text: isEdit
+            ? (existing!['amount'] as num).toDouble().toString().replaceFirst(RegExp(r'\.0$'), '')
+            : '');
+    final descController =
+        TextEditingController(text: isEdit ? existing!['description'] as String? ?? '' : '');
+    DateTime date = isEdit
+        ? (DateTime.tryParse(existing!['expense_date'] as String) ?? DateTime.now())
+        : DateTime.now();
+    // আগের ক্যাটাগরি তালিকায় না থাকলেও যেন ড্রপডাউন ঠিক থাকে
+    final categories = kExpenseCategories.contains(category)
+        ? kExpenseCategories
+        : [category, ...kExpenseCategories];
 
     await showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('নতুন খরচ'),
+          title: Text(isEdit ? 'খরচ সম্পাদনা' : 'নতুন খরচ'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -73,7 +86,7 @@ class _ExpenseScreenState extends State<ExpenseScreen> {
                 DropdownButtonFormField<String>(
                   value: category,
                   decoration: const InputDecoration(labelText: 'ক্যাটাগরি'),
-                  items: kExpenseCategories
+                  items: categories
                       .map((c) => DropdownMenuItem(value: c, child: Text(c)))
                       .toList(),
                   onChanged: (val) => setDialogState(() => category = val!),
@@ -103,13 +116,24 @@ class _ExpenseScreenState extends State<ExpenseScreen> {
               onPressed: () async {
                 final amount = double.tryParse(amountController.text) ?? 0;
                 if (amount <= 0) return;
-                await _transactionService.recordExpense(
-                  category: category,
-                  amount: amount,
-                  description: descController.text.trim(),
-                  expenseDate: DateFormat('yyyy-MM-dd').format(date),
-                  createdBy: widget.currentUser['id'] as int?,
-                );
+                if (isEdit) {
+                  await _transactionService.editExpense(
+                    expenseId: existing!['id'] as int,
+                    category: category,
+                    amount: amount,
+                    description: descController.text.trim(),
+                    expenseDate: DateFormat('yyyy-MM-dd').format(date),
+                    editedBy: widget.currentUser['id'] as int?,
+                  );
+                } else {
+                  await _transactionService.recordExpense(
+                    category: category,
+                    amount: amount,
+                    description: descController.text.trim(),
+                    expenseDate: DateFormat('yyyy-MM-dd').format(date),
+                    createdBy: widget.currentUser['id'] as int?,
+                  );
+                }
                 if (!ctx.mounted) return;
                 Navigator.pop(ctx);
                 _load();
@@ -130,7 +154,7 @@ class _ExpenseScreenState extends State<ExpenseScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('খরচ')),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showAddDialog,
+        onPressed: () => _showAddDialog(),
         icon: const Icon(Icons.add),
         label: const Text('নতুন খরচ'),
       ),
@@ -167,12 +191,21 @@ class _ExpenseScreenState extends State<ExpenseScreen> {
                             return Card(
                               margin: const EdgeInsets.only(bottom: 8),
                               child: ListTile(
+                                onTap: () => _showAddDialog(existing: e),
                                 title: Text(e['category'] as String),
                                 subtitle: Text(
                                     '${e['expense_date']}${(e['description'] as String? ?? '').isNotEmpty ? " • ${e['description']}" : ""}'),
-                                trailing: Text(
-                                    _currencyFormat.format((e['amount'] as num).toDouble()),
-                                    style: const TextStyle(fontWeight: FontWeight.w600)),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                        _currencyFormat.format((e['amount'] as num).toDouble()),
+                                        style: const TextStyle(fontWeight: FontWeight.w600)),
+                                    const SizedBox(width: 4),
+                                    const Icon(Icons.edit_outlined,
+                                        size: 18, color: AppColors.textSecondary),
+                                  ],
+                                ),
                               ),
                             );
                           },

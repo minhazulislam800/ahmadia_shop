@@ -9,6 +9,8 @@ import 'package:intl/intl.dart';
 import '../database/db_helper.dart';
 import '../database/transaction_service.dart';
 import '../utils/app_theme.dart';
+import '../utils/txn_items.dart';
+import '../widgets/add_party_dialog.dart';
 import '../widgets/date_field.dart';
 import 'purchase_entry_screen.dart';
 
@@ -215,7 +217,9 @@ class _SupplierLedgerScreenState extends State<SupplierLedgerScreen> {
   Future<void> _showSupplierDetail(Map<String, dynamic> supplier) async {
     final db = await _dbHelper.database;
     final purchases = await db.query('purchases',
-        where: 'supplier_id = ?', whereArgs: [supplier['id']], orderBy: 'purchase_date DESC');
+        where: 'supplier_id = ?', whereArgs: [supplier['id']], orderBy: 'purchase_date DESC, id DESC');
+    final purchaseItems = await TxnItems.forPurchases(
+        db, purchases.map((p) => p['id'] as int).toList());
     if (!mounted) return;
 
     showModalBottomSheet(
@@ -269,10 +273,24 @@ class _SupplierLedgerScreenState extends State<SupplierLedgerScreen> {
                           final p = purchases[i];
                           final total = (p['total_amount'] as num).toDouble();
                           final paid = (p['paid_amount'] as num).toDouble();
+                          final lines = purchaseItems[p['id'] as int] ?? const <TxnItemLine>[];
                           return ListTile(
+                            isThreeLine: lines.isNotEmpty,
                             title: Text('ক্রয় #${p['id']} — ${p['purchase_date']}'),
-                            subtitle: Text(
-                                'মোট: ৳${total.toStringAsFixed(0)} • পরিশোধিত: ৳${paid.toStringAsFixed(0)}'),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                ...lines.map((l) => Padding(
+                                      padding: const EdgeInsets.only(top: 2),
+                                      child: Text(l.summary,
+                                          style: const TextStyle(fontSize: 12.5)),
+                                    )),
+                                const SizedBox(height: 2),
+                                Text(
+                                    'মোট: ৳${total.toStringAsFixed(0)} • পরিশোধিত: ৳${paid.toStringAsFixed(0)}',
+                                    style: const TextStyle(fontWeight: FontWeight.w600)),
+                              ],
+                            ),
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
@@ -356,12 +374,24 @@ class _SupplierLedgerScreenState extends State<SupplierLedgerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('সাপ্লায়ার লেজার')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () async {
+          final added = await showAddPartyDialog(context,
+              tableName: 'suppliers',
+              label: 'সাপ্লায়ার',
+              phoneRequired: false,
+              userId: widget.currentUser['id'] as int?);
+          if (added) _load();
+        },
+        icon: const Icon(Icons.person_add_alt_1),
+        label: const Text('নতুন সাপ্লায়ার'),
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _suppliers.isEmpty
               ? const Center(child: Text('কোনো সাপ্লায়ার নেই'))
               : ListView.builder(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
                   itemCount: _suppliers.length,
                   itemBuilder: (ctx, i) {
                     final s = _suppliers[i];

@@ -8,12 +8,16 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../database/db_helper.dart';
+import '../database/transaction_service.dart';
+import '../widgets/date_field.dart';
 import '../utils/app_theme.dart';
 
 class CapitalHistoryScreen extends StatefulWidget {
   /// null হলে সব পার্টনারের হিস্টোরি দেখাবে
   final int? partnerId;
-  const CapitalHistoryScreen({super.key, this.partnerId});
+  /// এন্ট্রি এডিটে কে বদলাল তা লগে রাখার জন্য
+  final Map<String, dynamic>? currentUser;
+  const CapitalHistoryScreen({super.key, this.partnerId, this.currentUser});
 
   @override
   State<CapitalHistoryScreen> createState() => _CapitalHistoryScreenState();
@@ -21,6 +25,7 @@ class CapitalHistoryScreen extends StatefulWidget {
 
 class _CapitalHistoryScreenState extends State<CapitalHistoryScreen> {
   final _dbHelper = DBHelper.instance;
+  final _transactionService = TransactionService();
   final _currencyFormat =
       NumberFormat.currency(locale: 'bn_BD', symbol: '৳ ', decimalDigits: 0);
   final _dateFormat = DateFormat('yyyy-MM-dd');
@@ -114,6 +119,75 @@ class _CapitalHistoryScreenState extends State<CapitalHistoryScreen> {
       }
     });
     _load();
+  }
+
+  Future<void> _showEditDialog(Map<String, dynamic> row) async {
+    String type = row['type'] as String;
+    final amountController = TextEditingController(
+        text: (row['amount'] as num).toDouble().toString().replaceFirst(RegExp(r'\.0$'), ''));
+    final noteController = TextEditingController(text: row['note'] as String? ?? '');
+    DateTime date = DateTime.tryParse(row['transaction_date'] as String) ?? DateTime.now();
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text('${row['partner_name']} — এন্ট্রি সম্পাদনা'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ..._typeLabels.entries.map((e) => RadioListTile<String>(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(e.value),
+                      value: e.key,
+                      groupValue: type,
+                      onChanged: (v) => setDialogState(() => type = v!),
+                    )),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: amountController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'টাকার পরিমাণ'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: noteController,
+                  decoration: const InputDecoration(labelText: 'নোট (ঐচ্ছিক)'),
+                ),
+                const SizedBox(height: 12),
+                DateField(
+                  date: date,
+                  onChanged: (d) => setDialogState(() => date = d),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('বাতিল')),
+            ElevatedButton(
+              onPressed: () async {
+                final amount = double.tryParse(amountController.text) ?? 0;
+                if (amount <= 0) return;
+                await _transactionService.editCapitalTransaction(
+                  transactionId: row['id'] as int,
+                  type: type,
+                  amount: amount,
+                  date: DateFormat('yyyy-MM-dd').format(date),
+                  note: noteController.text.trim(),
+                  editedBy: widget.currentUser?['id'] as int?,
+                );
+                if (!ctx.mounted) return;
+                Navigator.pop(ctx);
+                _load();
+              },
+              child: const Text('সংরক্ষণ করুন'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   double _sumOf(List<Map<String, dynamic>> rows, String type) {
@@ -310,6 +384,7 @@ class _CapitalHistoryScreenState extends State<CapitalHistoryScreen> {
                         final note = (r['note'] as String? ?? '').trim();
                         return ListTile(
                           dense: true,
+                          onTap: () => _showEditDialog(r),
                           leading: Icon(
                             isIn
                                 ? Icons.arrow_downward_rounded
@@ -320,13 +395,20 @@ class _CapitalHistoryScreenState extends State<CapitalHistoryScreen> {
                               '${r['partner_name']} — ${_typeLabels[type] ?? type}'),
                           subtitle: Text(
                               '${r['transaction_date']}${note.isNotEmpty ? ' • $note' : ''}'),
-                          trailing: Text(
-                            '${isIn ? '+' : '-'}${_currencyFormat.format(amount)}',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w700,
-                              color:
-                                  isIn ? AppColors.success : AppColors.danger,
-                            ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '${isIn ? '+' : '-'}${_currencyFormat.format(amount)}',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  color: isIn ? AppColors.success : AppColors.danger,
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              const Icon(Icons.edit_outlined,
+                                  size: 16, color: AppColors.textSecondary),
+                            ],
                           ),
                         );
                       }).toList(),

@@ -10,11 +10,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
+import '../utils/safe_share.dart';
 import 'package:excel/excel.dart' as excel_lib;
 import '../database/db_helper.dart';
 import '../utils/app_theme.dart';
 import '../utils/report_pdf.dart';
+import '../utils/txn_items.dart';
 
 enum ReportMode { sale, purchase }
 
@@ -41,6 +42,8 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
 
   bool _loading = true;
   List<Map<String, dynamic>> _rows = [];
+  // প্রতিটা বিল/ক্রয়ের লাইন: পণ্য, পরিমাণ+একক, রেট, মোট
+  Map<int, List<TxnItemLine>> _items = {};
   List<Map<String, dynamic>> _parties = [];
   List<Map<String, dynamic>> _products = [];
 
@@ -125,9 +128,15 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
       ORDER BY t.$_dateCol DESC, t.id DESC
     ''', args);
 
+    final ids = result.map((r) => r['id'] as int).toList();
+    final items = _isSale
+        ? await TxnItems.forSales(db, ids)
+        : await TxnItems.forPurchases(db, ids);
+
     if (!mounted) return;
     setState(() {
       _rows = result;
+      _items = items;
       _loading = false;
     });
   }
@@ -162,24 +171,53 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
     final from = DateFormat('dd MMM yyyy').format(_fromDate);
     final to = DateFormat('dd MMM yyyy').format(_toDate);
 
+    // প্রতিটা বিলের প্রতিটা লাইন: পণ্য, পরিমাণ+একক, রেট, মোট; তারপর বিলের মোট
+    final tableRows = <List<String>>[];
+    final boldRows = <int>{};
+    for (final r in _rows) {
+      final id = r['id'] as int;
+      final lines = _items[id] ?? const <TxnItemLine>[];
+      final total = (r['total_amount'] as num?)?.toDouble() ?? 0;
+      final paid = (r['paid_amount'] as num?)?.toDouble() ?? 0;
+      final isCredit = (r['is_credit'] as int? ?? 0) == 1;
+      final due = isCredit ? total - paid : 0;
+      for (var i = 0; i < lines.length; i++) {
+        final l = lines[i];
+        tableRows.add([
+          i == 0 ? '${r['tx_date']}' : '',
+          i == 0 ? '#$id' : '',
+          i == 0 ? '${r['party_name'] ?? 'নগদ'}' : '',
+          l.productName,
+          l.quantityText,
+          l.rateText,
+          l.totalText,
+        ]);
+      }
+      boldRows.add(tableRows.length);
+      tableRows.add([
+        '',
+        '',
+        '',
+        due > 0
+            ? 'বিলের মোট (বাকি ৳${due.toStringAsFixed(0)})'
+            : 'বিলের মোট',
+        '',
+        '',
+        '৳${total.toStringAsFixed(0)}',
+      ]);
+    }
+
     // বাংলা ঠিকভাবে দেখানোর জন্য পাতাগুলো ছবি করে PDF বানানো হয়
     final bytes = await ReportPdf.build(
       title: '$_title — Ahmadia Shop',
       subtitles: ['সময়কাল: $from — $to'],
       blocks: [
         ReportTable(
-          headers: ['#', _partyLabel, 'পণ্য', 'তারিখ', 'মোট'],
-          flex: const [0.6, 1.6, 1.4, 1.2, 1.2],
-          rightAlign: const [false, false, false, false, true],
-          rows: _rows
-              .map((r) => [
-                    '${r['id']}',
-                    '${r['party_name'] ?? 'নগদ'}',
-                    '${r['product_names'] ?? ''}',
-                    '${r['tx_date']}',
-                    '৳${((r['total_amount'] as num?) ?? 0).toStringAsFixed(0)}',
-                  ])
-              .toList(),
+          headers: ['তারিখ', 'বিল', _partyLabel, 'পণ্য', 'পরিমাণ', 'রেট', 'টাকা'],
+          flex: const [1.15, 0.6, 1.2, 1.5, 1.15, 0.8, 0.95],
+          rightAlign: const [false, false, false, false, false, true, true],
+          rows: tableRows,
+          boldRows: boldRows,
         ),
         const ReportSpace(12),
         ReportKeyValue('মোট', '৳${_totalAmount.toStringAsFixed(0)}', bold: true),
@@ -190,34 +228,57 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
     final dir = await getTemporaryDirectory();
     final file = File('${dir.path}/${_isSale ? "sales" : "purchase"}_report.pdf');
     await file.writeAsBytes(bytes);
-    await Share.shareXFiles([XFile(file.path)], text: _title);
+    await SafeShare.files([file.path], text: _title);
   }
 
   Future<void> _exportExcel() async {
     final wb = excel_lib.Excel.createExcel();
     final sheet = wb[_title];
+    excel_lib.TextCellValue t(String v) => excel_lib.TextCellValue(v);
     sheet.appendRow([
-      excel_lib.TextCellValue('#'),
-      excel_lib.TextCellValue(_partyLabel),
-      excel_lib.TextCellValue('পণ্য'),
-      excel_lib.TextCellValue('তারিখ'),
-      excel_lib.TextCellValue('মোট'),
+      t('তারিখ'),
+      t('বিল #'),
+      t(_partyLabel),
+      t('পণ্য'),
+      t('পরিমাণ'),
+      t('একক'),
+      t('রেট'),
+      t('লাইনের টাকা'),
+      t('বিলের মোট'),
+      t('পরিশোধিত'),
+      t('বাকি'),
     ]);
     for (final r in _rows) {
-      sheet.appendRow([
-        excel_lib.TextCellValue('${r['id']}'),
-        excel_lib.TextCellValue(r['party_name'] as String? ?? 'নগদ'),
-        excel_lib.TextCellValue(r['product_names'] as String? ?? ''),
-        excel_lib.TextCellValue(r['tx_date'] as String),
-        excel_lib.DoubleCellValue(((r['total_amount'] as num?) ?? 0).toDouble()),
-      ]);
+      final id = r['id'] as int;
+      final lines = _items[id] ?? const <TxnItemLine>[];
+      final total = (r['total_amount'] as num?)?.toDouble() ?? 0;
+      final paid = (r['paid_amount'] as num?)?.toDouble() ?? 0;
+      final isCredit = (r['is_credit'] as int? ?? 0) == 1;
+      final due = isCredit ? total - paid : 0.0;
+      for (var i = 0; i < lines.length; i++) {
+        final l = lines[i];
+        final first = i == 0; // বিলের মোট/বাকি শুধু প্রথম সারিতে — যোগ করলে দ্বিগুণ না হয়
+        sheet.appendRow([
+          t('${r['tx_date']}'),
+          excel_lib.IntCellValue(id),
+          t('${r['party_name'] ?? 'নগদ'}'),
+          t(l.productName),
+          excel_lib.DoubleCellValue(l.quantity),
+          t(l.unit),
+          excel_lib.DoubleCellValue(l.rate),
+          excel_lib.DoubleCellValue(l.total),
+          first ? excel_lib.DoubleCellValue(total) : t(''),
+          first ? excel_lib.DoubleCellValue(paid) : t(''),
+          first ? excel_lib.DoubleCellValue(due) : t(''),
+        ]);
+      }
     }
     sheet.appendRow([
-      excel_lib.TextCellValue(''),
-      excel_lib.TextCellValue(''),
-      excel_lib.TextCellValue(''),
-      excel_lib.TextCellValue('মোট'),
+      t(''), t(''), t(''), t(''), t(''), t(''), t(''),
+      t('সর্বমোট'),
       excel_lib.DoubleCellValue(_totalAmount),
+      t(''),
+      excel_lib.DoubleCellValue(_totalDue),
     ]);
 
     final bytes = wb.encode();
@@ -225,7 +286,7 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
     final dir = await getTemporaryDirectory();
     final file = File('${dir.path}/${_isSale ? "sales" : "purchase"}_report.xlsx');
     await file.writeAsBytes(bytes);
-    await Share.shareXFiles([XFile(file.path)], text: '$_title (Excel)');
+    await SafeShare.files([file.path], text: '$_title (Excel)');
   }
 
   @override
@@ -345,6 +406,8 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
                               sortColumnIndex: _sortColumnIndex,
                               sortAscending: _sortAscending,
                               headingRowColor: WidgetStateProperty.all(AppColors.primaryLight),
+                              dataRowMinHeight: 48,
+                              dataRowMaxHeight: double.infinity,
                               columnSpacing: 20,
                               columns: [
                                 DataColumn(
@@ -376,9 +439,22 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
                                   DataCell(Text('${r['id']}')),
                                   DataCell(Text('${r['party_name'] ?? 'নগদ'}')),
                                   DataCell(SizedBox(
-                                      width: 160,
-                                      child: Text('${r['product_names']}',
-                                          overflow: TextOverflow.ellipsis))),
+                                      width: 250,
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(vertical: 6),
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: (_items[r['id'] as int] ??
+                                                  const <TxnItemLine>[])
+                                              .map((l) => Padding(
+                                                    padding: const EdgeInsets.only(bottom: 2),
+                                                    child: Text(l.summary,
+                                                        style: const TextStyle(fontSize: 12.5)),
+                                                  ))
+                                              .toList(),
+                                        ),
+                                      ))),
                                   DataCell(Text('${r['tx_date']}')),
                                   DataCell(Text(_currencyFormat.format(total))),
                                   DataCell(due > 0

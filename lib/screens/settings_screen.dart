@@ -7,7 +7,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:share_plus/share_plus.dart';
+import '../utils/safe_share.dart';
 import '../database/auth_service.dart';
 import '../database/backup_service.dart';
 import '../database/db_helper.dart';
@@ -53,7 +53,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SnackBar(content: Text('ব্যাকআপ তৈরি করা যায়নি')));
         return;
       }
-      await Share.shareXFiles([XFile(path)], text: 'Ahmadia Shop ব্যাকআপ');
+      await SafeShare.files([path], text: 'Ahmadia Shop ব্যাকআপ');
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)

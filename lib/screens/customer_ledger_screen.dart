@@ -10,6 +10,8 @@ import 'package:url_launcher/url_launcher.dart';
 import '../database/db_helper.dart';
 import '../database/transaction_service.dart';
 import '../utils/app_theme.dart';
+import '../utils/txn_items.dart';
+import '../widgets/add_party_dialog.dart';
 import '../widgets/date_field.dart';
 
 class CustomerLedgerScreen extends StatefulWidget {
@@ -242,7 +244,14 @@ class _CustomerLedgerScreenState extends State<CustomerLedgerScreen> {
   Future<void> _showCustomerDetail(Map<String, dynamic> customer) async {
     final db = await _dbHelper.database;
     final sales = await db.query('sales',
-        where: 'customer_id = ?', whereArgs: [customer['id']], orderBy: 'sale_date DESC');
+        where: 'customer_id = ?', whereArgs: [customer['id']], orderBy: 'sale_date DESC, id DESC');
+    // প্রতিটা বিক্রয়ের লাইন (পণ্য, পরিমাণ+একক, রেট, মোট) ও বাকি আদায়ের হিসাব
+    final saleItems =
+        await TxnItems.forSales(db, sales.map((s) => s['id'] as int).toList());
+    final payments = await db.query('due_payments',
+        where: "party_type = 'customer' AND party_id = ?",
+        whereArgs: [customer['id']],
+        orderBy: 'payment_date DESC, id DESC');
     if (!mounted) return;
 
     showModalBottomSheet(
@@ -287,26 +296,59 @@ class _CustomerLedgerScreenState extends State<CustomerLedgerScreen> {
               ),
               const Divider(height: 24),
               Expanded(
-                child: sales.isEmpty
+                child: (sales.isEmpty && payments.isEmpty)
                     ? const Center(child: Text('কোনো কেনাকাটার ইতিহাস নেই'))
-                    : ListView.builder(
+                    : ListView(
                         controller: scrollController,
-                        itemCount: sales.length,
-                        itemBuilder: (ctx, i) {
-                          final s = sales[i];
-                          final total = (s['total_amount'] as num).toDouble();
-                          final paid = (s['paid_amount'] as num).toDouble();
-                          return ListTile(
-                            title: Text('বিক্রয় #${s['id']} — ${s['sale_date']}'),
-                            subtitle: Text(
-                                'মোট: ৳${total.toStringAsFixed(0)} • পরিশোধিত: ৳${paid.toStringAsFixed(0)}'),
-                            trailing: total > paid
-                                ? Text('বাকি: ৳${(total - paid).toStringAsFixed(0)}',
-                                    style: const TextStyle(color: AppColors.danger))
-                                : const Icon(Icons.check_circle_outline,
-                                    color: AppColors.success),
-                          );
-                        },
+                        children: [
+                          ...sales.map((s) {
+                            final total = (s['total_amount'] as num).toDouble();
+                            final paid = (s['paid_amount'] as num).toDouble();
+                            final lines = saleItems[s['id'] as int] ?? const <TxnItemLine>[];
+                            return ListTile(
+                              isThreeLine: lines.isNotEmpty,
+                              title: Text('বিক্রয় #${s['id']} — ${s['sale_date']}'),
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  ...lines.map((l) => Padding(
+                                        padding: const EdgeInsets.only(top: 2),
+                                        child: Text(l.summary,
+                                            style: const TextStyle(fontSize: 12.5)),
+                                      )),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                      'মোট: ৳${total.toStringAsFixed(0)} • পরিশোধিত: ৳${paid.toStringAsFixed(0)}',
+                                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                                ],
+                              ),
+                              trailing: total > paid
+                                  ? Text('বাকি: ৳${(total - paid).toStringAsFixed(0)}',
+                                      style: const TextStyle(color: AppColors.danger))
+                                  : const Icon(Icons.check_circle_outline,
+                                      color: AppColors.success),
+                            );
+                          }),
+                          if (payments.isNotEmpty) ...[
+                            const Divider(height: 24),
+                            const Padding(
+                              padding: EdgeInsets.only(bottom: 4),
+                              child: Text('বাকি আদায়ের হিসাব',
+                                  style: TextStyle(fontWeight: FontWeight.w700)),
+                            ),
+                            ...payments.map((pm) => ListTile(
+                                  dense: true,
+                                  leading: const Icon(Icons.payments_outlined,
+                                      color: AppColors.success),
+                                  title: Text('${pm['payment_date']}'),
+                                  trailing: Text(
+                                      '৳${(pm['amount'] as num).toStringAsFixed(0)}',
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w600,
+                                          color: AppColors.success)),
+                                )),
+                          ],
+                        ],
                       ),
               ),
             ],
@@ -320,12 +362,24 @@ class _CustomerLedgerScreenState extends State<CustomerLedgerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('কাস্টমার লেজার')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () async {
+          final added = await showAddPartyDialog(context,
+              tableName: 'customers',
+              label: 'কাস্টমার',
+              phoneRequired: true,
+              userId: widget.currentUser['id'] as int?);
+          if (added) _load();
+        },
+        icon: const Icon(Icons.person_add_alt_1),
+        label: const Text('নতুন কাস্টমার'),
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _customers.isEmpty
               ? const Center(child: Text('কোনো কাস্টমার নেই'))
               : ListView.builder(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
                   itemCount: _customers.length,
                   itemBuilder: (ctx, i) {
                     final c = _customers[i];

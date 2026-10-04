@@ -9,7 +9,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
+import '../utils/safe_share.dart';
 import '../database/db_helper.dart';
 import '../utils/app_theme.dart';
 import '../utils/report_pdf.dart';
@@ -166,7 +166,7 @@ class _YearEndSummaryScreenState extends State<YearEndSummaryScreen> {
     final dir = await getTemporaryDirectory();
     final file = File('${dir.path}/year_end_summary_$_selectedYear.pdf');
     await file.writeAsBytes(bytes);
-    await Share.shareXFiles([XFile(file.path)],
+    await SafeShare.files([file.path],
         text: '$_selectedYear সালের বাৎসরিক সামারি — Ahmadia Shop');
   }
 
