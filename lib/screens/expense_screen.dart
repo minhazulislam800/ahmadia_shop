@@ -58,15 +58,15 @@ class _ExpenseScreenState extends State<ExpenseScreen> {
   Future<void> _showAddDialog({Map<String, dynamic>? existing}) async {
     final isEdit = existing != null;
     String category =
-        isEdit ? existing!['category'] as String : kExpenseCategories.first;
+        isEdit ? existing['category'] as String : kExpenseCategories.first;
     final amountController = TextEditingController(
         text: isEdit
-            ? (existing!['amount'] as num).toDouble().toString().replaceFirst(RegExp(r'\.0$'), '')
+            ? (existing['amount'] as num).toDouble().toString().replaceFirst(RegExp(r'\.0$'), '')
             : '');
     final descController =
-        TextEditingController(text: isEdit ? existing!['description'] as String? ?? '' : '');
+        TextEditingController(text: isEdit ? existing['description'] as String? ?? '' : '');
     DateTime date = isEdit
-        ? (DateTime.tryParse(existing!['expense_date'] as String) ?? DateTime.now())
+        ? (DateTime.tryParse(existing['expense_date'] as String) ?? DateTime.now())
         : DateTime.now();
     // আগের ক্যাটাগরি তালিকায় না থাকলেও যেন ড্রপডাউন ঠিক থাকে
     final categories = kExpenseCategories.contains(category)
@@ -118,7 +118,7 @@ class _ExpenseScreenState extends State<ExpenseScreen> {
                 if (amount <= 0) return;
                 if (isEdit) {
                   await _transactionService.editExpense(
-                    expenseId: existing!['id'] as int,
+                    expenseId: existing['id'] as int,
                     category: category,
                     amount: amount,
                     description: descController.text.trim(),
