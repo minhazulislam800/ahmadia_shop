@@ -75,8 +75,14 @@ class _StockAdjustmentScreenState extends State<StockAdjustmentScreen> {
   Future<void> _showEditDialog(Map<String, dynamic> a) async {
     final qtySigned = (a['quantity'] as num).toDouble();
     final isLoss = (a['base_quantity'] as num).toDouble() < 0;
-    final unitLabel =
-        (a['pack_unit_label'] as String?) ?? (a['base_unit'] as String);
+    final baseUnitName = a['base_unit'] as String;
+    // এই পণ্যের সক্রিয় এককগুলো (কেজি/গ্রাম ইত্যাদি) — এডিটে এককও বদলানো যায়
+    final unitRows = await (await _dbHelper.database).query('product_units',
+        where: 'product_id = ? AND is_active = 1',
+        whereArgs: [a['product_id']],
+        orderBy: 'conversion_factor_to_base ASC');
+    final units = unitRows.map((r) => ProductUnit.fromMap(r)).toList();
+    int? selectedUnitId = a['product_unit_id'] as int?;
     final options = _reasonOptions
         .where((r) => r.decreasesStock == null || r.decreasesStock == isLoss)
         .toList();
@@ -110,10 +116,33 @@ class _StockAdjustmentScreenState extends State<StockAdjustmentScreen> {
                   onChanged: (v) => setDialogState(() => reason = v!),
                 ),
                 const SizedBox(height: 12),
+                if (units.isNotEmpty) ...[
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      ChoiceChip(
+                        label: Text(baseUnitName),
+                        selected: selectedUnitId == null,
+                        onSelected: (_) =>
+                            setDialogState(() => selectedUnitId = null),
+                      ),
+                      ...units.map((u) => ChoiceChip(
+                            label: Text(u.unitLabel),
+                            selected: selectedUnitId == u.id,
+                            onSelected: (_) =>
+                                setDialogState(() => selectedUnitId = u.id),
+                          )),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                ],
                 TextField(
                   controller: qtyController,
                   keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: InputDecoration(labelText: 'পরিমাণ ($unitLabel)'),
+                  decoration: InputDecoration(
+                      labelText:
+                          'পরিমাণ (${selectedUnitId == null ? baseUnitName : units.firstWhere((u) => u.id == selectedUnitId, orElse: () => units.first).unitLabel})'),
                 ),
                 const SizedBox(height: 12),
                 DateField(
@@ -138,6 +167,7 @@ class _StockAdjustmentScreenState extends State<StockAdjustmentScreen> {
                   await _transactionService.editStockAdjustment(
                     adjustmentId: a['id'] as int,
                     newQuantityAbs: qty,
+                    newProductUnitId: selectedUnitId,
                     reason: reason,
                     note: noteController.text.trim(),
                     date: DateFormat('yyyy-MM-dd').format(date),
@@ -300,24 +330,28 @@ class _StockAdjustmentScreenState extends State<StockAdjustmentScreen> {
                           },
                         ),
                         if (_availableUnits.isNotEmpty) ...[
-                          const SizedBox(height: 8),
-                          DropdownButtonFormField<ProductUnit?>(
-                            value: _selectedUnit,
-                            isExpanded: true,
-                            decoration: const InputDecoration(labelText: 'একক'),
-                            items: [
-                              DropdownMenuItem<ProductUnit?>(
-                                value: null,
-                                child: Text('সরাসরি $_baseUnit (base unit)'),
+                          const SizedBox(height: 12),
+                          const Text('একক',
+                              style: TextStyle(
+                                  fontSize: 12, color: AppColors.textSecondary)),
+                          const SizedBox(height: 4),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 4,
+                            children: [
+                              ChoiceChip(
+                                label: Text(_baseUnit),
+                                selected: _selectedUnit == null,
+                                onSelected: (_) =>
+                                    setState(() => _selectedUnit = null),
                               ),
-                              ..._availableUnits.map((u) =>
-                                  DropdownMenuItem<ProductUnit?>(
-                                    value: u,
-                                    child: Text(
-                                        '${u.unitLabel} (= ${u.conversionFactorToBase} $_baseUnit)'),
+                              ..._availableUnits.map((u) => ChoiceChip(
+                                    label: Text(u.unitLabel),
+                                    selected: _selectedUnit == u,
+                                    onSelected: (_) =>
+                                        setState(() => _selectedUnit = u),
                                   )),
                             ],
-                            onChanged: (u) => setState(() => _selectedUnit = u),
                           ),
                         ],
                         const SizedBox(height: 8),

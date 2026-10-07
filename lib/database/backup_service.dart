@@ -46,6 +46,11 @@ class BackupService {
   static const String _fingerprintKey = 'last_backup_fingerprint';
   static const String _createdAtKey = 'backup_created_at';
 
+  // নতুন ব্যাকআপের এনক্রিপ্টেড ডেটার শেষে: [ডাটাবেসের SHA-256 (৩২ বাইট)][৮ বাইটের চিহ্ন]।
+  // রিস্টোরের সময় মেলানো হয় — ফাইলের একটা বাইটও নষ্ট হলে ধরা পড়ে। পুরনো ব্যাকআপে এটা
+  // নেই, সেগুলো আগের মতোই খোলে।
+  static const String _trailerMagic = 'AHSHA256';
+
   /// পাসওয়ার্ড থেকে ৩২ বাইটের একটা এনক্রিপশন কী তৈরি করা (SHA-256)
   enc.Key _deriveKey(String password) {
     final hash = sha256.convert(utf8.encode(password)).bytes;
@@ -75,7 +80,12 @@ class BackupService {
     // আসল ডেটা data-key দিয়ে এনক্রিপ্ট করা
     final dataIv = enc.IV.fromSecureRandom(16);
     final dataEncrypter = enc.Encrypter(enc.AES(dataKey, mode: enc.AESMode.cbc));
-    final encryptedData = dataEncrypter.encryptBytes(dbBytes, iv: dataIv);
+    final payload = Uint8List.fromList([
+      ...dbBytes,
+      ...sha256.convert(dbBytes).bytes,
+      ...utf8.encode(_trailerMagic),
+    ]);
+    final encryptedData = dataEncrypter.encryptBytes(payload, iv: dataIv);
 
     final wrappedKeyLen = wrappedKey.bytes.length;
     final header = ByteData(2)..setUint16(0, wrappedKeyLen, Endian.big);
@@ -111,7 +121,7 @@ class BackupService {
       Uint8List allBytes, String password) async {
     for (final candidate in [password, _passwordHash(password)]) {
       try {
-        final result = await _tryDecrypt(allBytes, candidate);
+        final result = _verifyAndStripTrailer(await _tryDecrypt(allBytes, candidate));
         if (_looksLikeSqlite(result)) return result;
       } catch (_) {
         // এই পদ্ধতিতে খোলেনি — পরেরটা চেষ্টা করা হবে
@@ -119,6 +129,27 @@ class BackupService {
     }
     throw Exception(
         'পাসওয়ার্ড ভুল, অথবা ফাইল নষ্ট হয়ে গেছে, অথবা এই ব্যাকআপ ভিন্ন একটা পাসওয়ার্ড দিয়ে নেওয়া হয়েছিল');
+  }
+
+  /// নতুন ফরম্যাটের ব্যাকআপে ডেটার SHA-256 মিলিয়ে দেখা (নষ্ট হলে Exception);
+  /// পুরনো ফরম্যাটে (চিহ্ন নেই) ডেটা যেমন আছে তেমনই ফেরত
+  List<int> _verifyAndStripTrailer(List<int> bytes) {
+    final magic = utf8.encode(_trailerMagic);
+    if (bytes.length <= 32 + magic.length) return bytes;
+    final tailStart = bytes.length - magic.length;
+    for (var i = 0; i < magic.length; i++) {
+      if (bytes[tailStart + i] != magic[i]) return bytes; // পুরনো ফরম্যাট
+    }
+    final hashStart = tailStart - 32;
+    final data = bytes.sublist(0, hashStart);
+    final stored = bytes.sublist(hashStart, tailStart);
+    final actual = sha256.convert(data).bytes;
+    for (var i = 0; i < 32; i++) {
+      if (stored[i] != actual[i]) {
+        throw Exception('ব্যাকআপ ফাইলের ডেটা নষ্ট (checksum মেলেনি)');
+      }
+    }
+    return data;
   }
 
   Future<List<int>> _tryDecrypt(Uint8List allBytes, String password) async {
@@ -153,6 +184,7 @@ class BackupService {
   /// করে সেই ফাইলের path রিটার্ন করে (শেয়ার/সেভ করার জন্য প্রস্তুত)
   Future<String> createEncryptedBackup(String password) async {
     await _stampBackupCreated();
+    await _flushToMainFile();
     final dbPath = await getDatabasesPath();
     final dbFile = File(join(dbPath, 'ahmadia_shop.db'));
     final dbBytes = await dbFile.readAsBytes();
@@ -174,14 +206,16 @@ class BackupService {
   /// (ভুল পাসওয়ার্ড হলে Exception ছুঁড়ে দেবে)
   Future<void> restoreFromBackup(String backupFilePath, String password) async {
     final decryptedBytes = await _decryptBackupFile(backupFilePath, password);
+    await _verifyBackupBytes(decryptedBytes); // নষ্ট ফাইল হলে এখানেই থামবে, বর্তমান ডেটা অক্ষত
 
     // বর্তমান ডাটাবেস কানেকশন বন্ধ করে ফাইল প্রতিস্থাপন করতে হবে
     final dbPath = await getDatabasesPath();
     final dbFile = File(join(dbPath, 'ahmadia_shop.db'));
 
     // আগের সব ডাটাবেস কানেকশন বন্ধ করা (নিরাপদে ফাইল বদলানোর জন্য)
+    await DBHelper.instance.closeConnection();
     await databaseFactory.deleteDatabase(dbFile.path).catchError((_) {});
-    await dbFile.writeAsBytes(decryptedBytes);
+    await dbFile.writeAsBytes(decryptedBytes, flush: true);
   }
 
   /// এনক্রিপ্টেড ব্যাকআপ ফাইল ডিক্রিপ্ট করে একটা টেম্প .db ফাইলে
@@ -203,6 +237,16 @@ class BackupService {
     return _parseAndDecryptBackupBytes(allBytes, password);
   }
 
+  /// ডাটাবেস ফাইল কপির আগে: যদি Android ডাটাবেসটা WAL মোডে চালায়, তাহলে সদ্য সেভ
+  /// হওয়া তথ্য আলাদা -wal ফাইলে থাকতে পারে যা শুধু .db কপি করলে বাদ পড়ত। এই
+  /// checkpoint সব তথ্য মূল ফাইলে নিয়ে আসে (WAL মোডে না থাকলে কিছুই করে না)।
+  Future<void> _flushToMainFile() async {
+    try {
+      final db = await DBHelper.instance.database;
+      await db.rawQuery('PRAGMA wal_checkpoint(TRUNCATE)');
+    } catch (_) {}
+  }
+
   /// ব্যাকআপ ফাইলের ভেতরের ডেটাতেই তার তৈরির সময় লিখে দেওয়া — ফাইলের
   /// নাম বদলে গেলেও রিস্টোরের সময় সঠিক তারিখ দেখানো যায়
   Future<void> _stampBackupCreated() async {
@@ -220,24 +264,29 @@ class BackupService {
         '${m.group(1)}-${m.group(2)}-${m.group(3)} ${m.group(4)}:${m.group(5)}:00');
   }
 
-  /// ব্যাকআপ ফাইল পাসওয়ার্ড দিয়ে খুলে দেখে (বর্তমান ডেটায় হাত না দিয়ে) —
-  /// ভুল পাসওয়ার্ড/নষ্ট ফাইল হলে Exception, ঠিক হলে ব্যাকআপ তৈরির সময়
-  /// (পুরনো ফরম্যাটের ফাইলে না থাকলে null)
-  Future<DateTime?> inspectBackup(String backupFilePath, String password) async {
-    final bytes = await _decryptBackupFile(backupFilePath, password);
+  /// ডিক্রিপ্ট হওয়া ডেটা সত্যিই একটা অক্ষত SQLite ডাটাবেস কি না যাচাই (একটা টেম্প ফাইলে
+  /// লিখে খুলে `integrity_check`) এবং ব্যাকআপ তৈরির সময় (থাকলে) পড়া। নষ্ট হলে Exception।
+  Future<DateTime?> _verifyBackupBytes(List<int> bytes) async {
     final tempDir = await getTemporaryDirectory();
     final tempFile = File(join(
-        tempDir.path, 'inspect_${DateTime.now().millisecondsSinceEpoch}.db'));
-    await tempFile.writeAsBytes(bytes);
+        tempDir.path, 'verify_${DateTime.now().millisecondsSinceEpoch}.db'));
+    await tempFile.writeAsBytes(bytes, flush: true);
     Database? db;
     try {
       db = await openDatabase(tempFile.path, readOnly: true, singleInstance: false);
-      final rows = await db.query('app_settings',
-          where: 'key = ?', whereArgs: [_createdAtKey]);
-      if (rows.isEmpty) return null;
-      return DateTime.tryParse((rows.first['value'] as String?) ?? '');
-    } catch (_) {
-      return null;
+      final check = await db.rawQuery('PRAGMA integrity_check');
+      if (check.isEmpty || check.first.values.first.toString() != 'ok') {
+        throw Exception('ব্যাকআপ ফাইলের ডাটাবেস নষ্ট (integrity check ব্যর্থ)');
+      }
+      DateTime? created;
+      try {
+        final rows = await db.query('app_settings',
+            where: 'key = ?', whereArgs: [_createdAtKey]);
+        if (rows.isNotEmpty) {
+          created = DateTime.tryParse((rows.first['value'] as String?) ?? '');
+        }
+      } catch (_) {}
+      return created;
     } finally {
       try {
         await db?.close();
@@ -248,11 +297,20 @@ class BackupService {
     }
   }
 
+  /// ব্যাকআপ ফাইল পাসওয়ার্ড দিয়ে খুলে দেখে (বর্তমান ডেটায় হাত না দিয়ে) —
+  /// ভুল পাসওয়ার্ড/নষ্ট ফাইল হলে Exception, ঠিক হলে ব্যাকআপ তৈরির সময়
+  /// (পুরনো ফরম্যাটের ফাইলে না থাকলে null)
+  Future<DateTime?> inspectBackup(String backupFilePath, String password) async {
+    final bytes = await _decryptBackupFile(backupFilePath, password);
+    return _verifyBackupBytes(bytes);
+  }
+
   /// ব্যাকআপ ফাইল দিয়ে বর্তমান ডেটা সম্পূর্ণ প্রতিস্থাপন — অ্যাপ রিস্টার্ট
-  /// ছাড়াই। আগে ফাইল ডিক্রিপ্ট হয় (ভুল পাসওয়ার্ড হলে বর্তমান ডেটা অক্ষত
-  /// থাকে)। সংরক্ষিত লগইন সেশন মুছে ফেলা হয়, তাই এরপর লগইন করতে হবে।
+  /// ছাড়াই। আগে ফাইল ডিক্রিপ্ট ও যাচাই হয় (ভুল পাসওয়ার্ড বা নষ্ট ফাইল হলে বর্তমান
+  /// ডেটা অক্ষত থাকে)। সংরক্ষিত লগইন সেশন মুছে ফেলা হয়, তাই এরপর লগইন করতে হবে।
   Future<void> restoreAndReset(String backupFilePath, String password) async {
     final bytes = await _decryptBackupFile(backupFilePath, password);
+    await _verifyBackupBytes(bytes);
 
     await DBHelper.instance.closeConnection();
     final dbPath = await getDatabasesPath();
@@ -408,6 +466,7 @@ class BackupService {
   /// হয়ে গেলে সবচেয়ে পুরনোটা মুছে ফেলে (rotation)
   Future<String> createRotatingBackup(String password) async {
     await _stampBackupCreated();
+    await _flushToMainFile();
     final dbPath = await getDatabasesPath();
     final dbFile = File(join(dbPath, 'ahmadia_shop.db'));
     final dbBytes = await dbFile.readAsBytes();

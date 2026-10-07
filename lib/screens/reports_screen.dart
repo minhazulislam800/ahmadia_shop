@@ -15,6 +15,7 @@ import '../database/db_helper.dart';
 import '../utils/app_theme.dart';
 import '../utils/full_export.dart';
 import '../utils/report_pdf.dart';
+import 'expense_report_screen.dart';
 import 'transaction_report_screen.dart';
 import 'year_end_summary_screen.dart';
 import '../widgets/app_bottom_nav.dart';
@@ -273,6 +274,20 @@ class _ReportsScreenState extends State<ReportsScreen> {
                         MaterialPageRoute(
                             builder: (_) =>
                                 const TransactionReportScreen(mode: ReportMode.purchase))),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.receipt_long_outlined),
+                    title: const Text('খরচ রিপোর্ট'),
+                    subtitle: const Text(
+                        'ক্যাটাগরি অনুযায়ী খরচ, স্টক নষ্ট/গিফটের ক্ষতিসহ — PDF/Excel'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => const ExpenseReportScreen())),
                   ),
                 ),
                 const SizedBox(height: 20),

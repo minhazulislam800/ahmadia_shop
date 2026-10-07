@@ -100,6 +100,25 @@ class ReturnService {
       final unitPrice = (saleItem['unit_price'] as num).toDouble();
       final productUnitId = saleItem['product_unit_id'] as int?;
 
+      // বাকির সাথে সমন্বয় কাস্টমারের বর্তমান বাকির চেয়ে বেশি হতে পারে না — নাহলে
+      // কাস্টমারের বাকি ঋণাত্মক হয়ে যেত; বাড়তি অংশ ক্যাশে ফেরত দিতে হবে
+      final customerId = saleRow['customer_id'] as int?;
+      if (!refundToCash && customerId != null) {
+        final preview = QuantityMath.round(quantity * unitPrice);
+        final dueRows = await txn.rawQuery('''
+          SELECT COALESCE((SELECT SUM(total_amount - paid_amount) FROM sales
+                           WHERE customer_id = ? AND is_credit = 1), 0)
+               - COALESCE((SELECT SUM(amount) FROM due_payments
+                           WHERE party_type = 'customer' AND party_id = ?), 0) AS due
+        ''', [customerId, customerId]);
+        final due = (dueRows.first['due'] as num).toDouble();
+        if (preview > (due > 0 ? due : 0) + 0.005) {
+          throw Exception(
+              'বাকির হিসাবে সমন্বয় করা যাবে কাস্টমারের বর্তমান বাকি (৳${due > 0 ? due.toStringAsFixed(0) : '0'}) পর্যন্ত — '
+              'ফেরতের মূল্য ৳${preview.toStringAsFixed(0)}। বাড়তি অংশের জন্য "ক্যাশ ফেরত" চালু করুন।');
+        }
+      }
+
       double conversionFactor = 1;
       if (productUnitId != null) {
         final puRows = await txn.query('product_units',
@@ -109,6 +128,7 @@ class ReturnService {
               (puRows.first['conversion_factor_to_base'] as num).toDouble();
         }
       }
+      QuantityMath.requireRepresentable(quantity, conversionFactor);
       final baseQty = QuantityMath.toBase(quantity, conversionFactor);
 
       // এই sale_item কোন কোন ব্যাচ থেকে কাটা হয়েছিল, সেই একই
@@ -203,6 +223,7 @@ class ReturnService {
       if (quantity <= 0) {
         throw Exception('সঠিক পরিমাণ দিন');
       }
+      QuantityMath.requireRepresentable(quantity, 1);
       if (!refundToCash) {
         // দেনার সাথে সমন্বয় শুধু বাকিতে কেনা ক্রয়ের ক্ষেত্রে চলে
         final purchaseId = batch['purchase_id'];
@@ -217,6 +238,27 @@ class ReturnService {
         if (isCredit != 1) {
           throw Exception(
               'নগদে কেনা মালের ফেরতে সাপ্লায়ার থেকে ক্যাশ ফেরত নিতে হবে (শুধু বাকির ক্রয়ে দেনা থেকে সমন্বয় চলে)');
+        }
+        // দেনার সাথে সমন্বয় সাপ্লায়ারের বর্তমান দেনার চেয়ে বেশি হতে পারে না
+        final supplierId = (await txn.query('purchases',
+                columns: ['supplier_id'],
+                where: 'id = ?',
+                whereArgs: [purchaseId]))
+            .first['supplier_id'] as int?;
+        if (supplierId != null) {
+          final preview = quantity * unitCost;
+          final dueRows = await txn.rawQuery('''
+            SELECT COALESCE((SELECT SUM(total_amount - paid_amount) FROM purchases
+                             WHERE supplier_id = ? AND is_credit = 1), 0)
+                 - COALESCE((SELECT SUM(amount) FROM due_payments
+                             WHERE party_type = 'supplier' AND party_id = ?), 0) AS due
+          ''', [supplierId, supplierId]);
+          final due = (dueRows.first['due'] as num).toDouble();
+          if (preview > (due > 0 ? due : 0) + 0.005) {
+            throw Exception(
+                'দেনার হিসাবে সমন্বয় করা যাবে সাপ্লায়ারের বর্তমান দেনা (৳${due > 0 ? due.toStringAsFixed(0) : '0'}) পর্যন্ত — '
+                'ফেরতের মূল্য ৳${preview.toStringAsFixed(0)}। বাড়তি অংশের জন্য "ক্যাশ ফেরত" চালু করুন।');
+          }
         }
       }
 

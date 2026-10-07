@@ -551,8 +551,8 @@ class DBHelper {
 
     // দোকানের ডিফল্ট সেটিংস — পরে সেটিংস স্ক্রিন থেকে পরিবর্তন করা যাবে
     await db.insert('app_settings', {'key': 'shop_name', 'value': 'Ahmadia Shop'});
-    await db.insert('app_settings', {'key': 'shop_address', 'value': ''});
-    await db.insert('app_settings', {'key': 'shop_phone', 'value': ''});
+    await db.insert('app_settings', {'key': 'shop_address', 'value': 'Khulna Sadar, Khulna.'});
+    await db.insert('app_settings', {'key': 'shop_phone', 'value': '01822691836'});
     await db.insert('app_settings', {'key': 'shop_logo_path', 'value': ''});
     await db.insert('app_settings', {'key': 'last_backup_at', 'value': ''});
 

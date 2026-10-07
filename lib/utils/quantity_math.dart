@@ -48,6 +48,22 @@ class QuantityMath {
   static double toBase(double packQuantity, double conversionFactorToBase) =>
       round(packQuantity * conversionFactorToBase);
 
+  /// pack পরিমাণ × conversion = base পরিমাণ, সেটা নির্ধারিত দশমিক ঘরে (৩) হুবহু
+  /// লেখা যায় কি না। যায় না এমন মাপ (যেমন ০.৫ গ্রাম = ০.০০০৫ কেজি) রাউন্ড হয়ে স্টক/দামের
+  /// হিসাবে গরমিল ঘটাত — তাই এমন পরিমাণ গ্রহণই করা হয় না।
+  static bool isRepresentable(double packQuantity, double conversionFactorToBase) {
+    final v = packQuantity * conversionFactorToBase * _factor();
+    return (v - v.roundToDouble()).abs() < 1e-6;
+  }
+
+  static void requireRepresentable(double packQuantity, double conversionFactorToBase) {
+    if (!isRepresentable(packQuantity, conversionFactorToBase)) {
+      throw Exception(
+          'এই পরিমাণ ($packQuantity) নির্ভুলভাবে ধরা যায় না — স্টক সর্বোচ্চ ৩ দশমিক ঘর পর্যন্ত '
+          '(যেমন কেজিতে ০.০০১ = ১ গ্রাম) রাখা যায়। এর চেয়ে ছোট মাপ দেওয়া যাবে না।');
+    }
+  }
+
   /// দুইটা quantity প্রায় সমান কিনা (floating-point তুলনা নিরাপদে করার জন্য
   /// — সরাসরি `a == b` ব্যবহার করা যাবে না, কারণ rounding-এর পরেও
   /// মাইক্রো-পার্থক্য থাকতে পারে)

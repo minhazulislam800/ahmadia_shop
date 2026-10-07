@@ -149,6 +149,46 @@ class _BulkImportScreenState extends State<BulkImportScreen> {
   String _norm(String s) =>
       s.toLowerCase().replaceAll(RegExp(r'[\s_\-:.]+'), ' ').trim();
 
+  // ফাইলের ওপরে শিরোনাম/তারিখের সারি থাকলেও কাজ করার জন্য: প্রথম ১৫ সারির মধ্যে যে
+  // সারিতে সবচেয়ে বেশি পরিচিত হেডিং আছে সেটাকেই হেডিং ধরে ওপরের সারিগুলো বাদ দেওয়া হয়
+  List<List<String>> _trimToHeader(List<List<String>> rows) {
+    var best = 0;
+    var bestScore = -1;
+    final limit = rows.length < 15 ? rows.length : 15;
+    for (var i = 0; i < limit; i++) {
+      final headers = rows[i].map(_norm).where((h) => h.isNotEmpty).toSet();
+      var score = 0;
+      for (final f in _fields) {
+        if (f.synonyms.any((s) => headers.contains(_norm(s)))) score++;
+      }
+      if (score > bestScore) {
+        best = i;
+        bestScore = score;
+      }
+    }
+    return (bestScore >= 1 && best > 0) ? rows.sublist(best) : rows;
+  }
+
+  static const String _bnDigits = '০১২৩৪৫৬৭৮৯';
+
+  // "১২০০", "1,450", "৳ 380", "Tk 90" — সব ধরনের লেখা থেকে সংখ্যা পড়ে (না পারলে null)
+  double? _parseNumber(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) return null;
+    final buffer = StringBuffer();
+    for (final ch in text.split('')) {
+      final i = _bnDigits.indexOf(ch);
+      buffer.write(i >= 0 ? '$i' : ch);
+    }
+    final cleaned = buffer
+        .toString()
+        .replaceAll('৳', '')
+        .replaceAll(RegExp(r'tk\.?|taka', caseSensitive: false), '')
+        .replaceAll(',', '')
+        .replaceAll(RegExp(r'\s+'), '');
+    return double.tryParse(cleaned);
+  }
+
   // হেডিং মিলিয়ে নিজে থেকে ম্যাপ করা (একটা কলাম একাধিক ক্ষেত্রে বসে না)
   void _autoMap() {
     _mapping.clear();
@@ -187,7 +227,7 @@ class _BulkImportScreenState extends State<BulkImportScreen> {
         _excel = null;
         _sheetNames = [];
         _sheetName = null;
-        _rows = _parseCsv(content);
+        _rows = _trimToHeader(_parseCsv(content));
       } else {
         final bytes = await file.readAsBytes();
         _excel = excel_lib.Excel.decodeBytes(bytes);
@@ -196,7 +236,9 @@ class _BulkImportScreenState extends State<BulkImportScreen> {
         _sheetName = _sheetNames.firstWhere(
             (n) => _sheetRows(n).isNotEmpty,
             orElse: () => _sheetNames.isEmpty ? '' : _sheetNames.first);
-        _rows = _sheetName == null || _sheetName!.isEmpty ? [] : _sheetRows(_sheetName!);
+        _rows = _sheetName == null || _sheetName!.isEmpty
+            ? []
+            : _trimToHeader(_sheetRows(_sheetName!));
       }
       _fileName = name;
       if (_rows.length < 2) {
@@ -216,7 +258,7 @@ class _BulkImportScreenState extends State<BulkImportScreen> {
   void _changeSheet(String name) {
     setState(() {
       _sheetName = name;
-      _rows = _sheetRows(name);
+      _rows = _trimToHeader(_sheetRows(name));
       _log = _rows.length < 2 ? ['❌ এই শিটে ডেটা নেই'] : [];
       if (_rows.length >= 2) _autoMap();
     });
@@ -260,9 +302,9 @@ class _BulkImportScreenState extends State<BulkImportScreen> {
         final category = _cell(row, 'category');
         final unitRaw = _cell(row, 'unit');
         final unit = unitRaw.isNotEmpty ? unitRaw : 'পিস';
-        final threshold = double.tryParse(_cell(row, 'threshold')) ?? 0.0;
-        final retail = double.tryParse(_cell(row, 'retail'));
-        final wholesale = double.tryParse(_cell(row, 'wholesale'));
+        final threshold = _parseNumber(_cell(row, 'threshold')) ?? 0.0;
+        final retail = _parseNumber(_cell(row, 'retail'));
+        final wholesale = _parseNumber(_cell(row, 'wholesale'));
 
         if (code.isEmpty) {
           if (_autoCode) {

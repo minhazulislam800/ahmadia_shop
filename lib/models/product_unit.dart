@@ -27,6 +27,16 @@ class ProductUnit {
     this.syncId,
   });
 
+  // একই id মানেই একই unit — আলাদা query থেকে আসা object-ও সমান ধরা হয়
+  // (নাহলে dropdown/chip-এ নির্বাচিত মান খুঁজে পায় না)
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ProductUnit && id != null && other.id == id);
+
+  @override
+  int get hashCode => id ?? identityHashCode(this);
+
   /// এই pack-এর কত পরিমাণ = base unit-এ কত পরিমাণ
   double toBaseQuantity(double packQuantity) =>
       packQuantity * conversionFactorToBase;

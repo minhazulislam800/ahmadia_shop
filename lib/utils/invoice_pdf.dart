@@ -24,6 +24,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:sqflite/sqflite.dart';
 import '../database/db_helper.dart';
 import 'app_theme.dart';
+import 'shop_defaults.dart';
 
 class _InvoiceRow {
   final String name;
@@ -44,6 +45,9 @@ class _InvoiceData {
   final String customerName;
   final String customerContact;
   final String saleType;
+  final String invoiceNo; // কমপক্ষে ২ অঙ্ক (০১, ০২ …)
+  final String dateText; // DD-MM-YYYY
+  final String payLabel; // পরিশোধিত / আংশিক পরিশোধ / সম্পূর্ণ বাকি
   final List<_InvoiceRow> rows;
   final double productsTotal;
   final double courier;
@@ -63,6 +67,9 @@ class _InvoiceData {
     required this.customerName,
     required this.customerContact,
     required this.saleType,
+    required this.invoiceNo,
+    required this.dateText,
+    required this.payLabel,
     required this.rows,
     required this.productsTotal,
     required this.courier,
@@ -84,21 +91,61 @@ class InvoicePdfGenerator {
   // ডিজাইনের মাপ লজিক্যাল পিক্সেলে (A4 = 794 x 1123 @96dpi)
   static const double _w = 794;
   static const double _scale = 2.0; // আউটপুট ছবির sharpness
-  static const double _margin = 24;
-  static const double _rowH = 22;
-  static const int _halfPageRows = 10;
-  static const int _fullPageRows = 32;
+  // নতুন ডিজাইনে হেডার ও ব্র্যান্ড বক্স আছে, তাই অর্ধেক A4-তে ৮টা পণ্য ধরে
+  static const int _halfPageRows = 8;
+  static const int _fullPageRows = 28;
+  static const double _left = 30;
+  static const double _right = _w - 30;
+  static const double _rowHeight = 25;
+  static const double _brandBoxH = 134;
   static const String _font = 'NotoSansBengali';
   static const Color _green = Color(0xFF3F7637); // লোগোর সবুজ
   static const Color _orange = Color(0xFFFD9E0F); // লোগোর কমলা
   static const Color _tint = Color(0xFFF1F6EF);
+  static const Color _red = Color(0xFFD32F2F);
+  static const Color _redBg = Color(0xFFFDECEA);
+  static const Color _greenBg = Color(0xFFE4F1E1);
+  static const Color _zebra = Color(0xFFF7F9F6);
 
   static final NumberFormat _money = NumberFormat('#,##0');
 
   static String _taka(double v) => '৳ ${_money.format(v.round())}';
 
+  // রেট ভগ্নাংশ হতে পারে (যেমন প্রতি গ্রাম ৳০.১২) — তাই দশমিক সহ দেখানো হয়
+  static String _rate(double v) {
+    if (v == v.roundToDouble()) return _taka(v);
+    var s = v.toStringAsFixed(4).replaceFirst(RegExp(r'0+$'), '');
+    s = s.replaceFirst(RegExp(r'\.$'), '');
+    return '৳ $s';
+  }
+
   static String _num(double v) =>
       v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toString();
+
+  static String _dateText(String raw) {
+    final dt = DateTime.tryParse(raw);
+    if (dt == null) return raw;
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${two(dt.day)}-${two(dt.month)}-${dt.year}';
+  }
+
+  /// শেয়ার করা ফাইলের নাম: Invoice_AS_<তারিখ DD-MM-YY>_<ইনভয়েস নম্বর>.pdf
+  /// (যেমন Invoice_AS_01-12-26_01) — তারিখ ইনভয়েসের নিজের (বিক্রয়ের) তারিখ
+  static Future<String> fileName(int saleId) async {
+    final db = await DBHelper.instance.database;
+    final rows = await db.query('sales',
+        columns: ['sale_date'], where: 'id = ?', whereArgs: [saleId]);
+    var date = '';
+    if (rows.isNotEmpty) {
+      final dt = DateTime.tryParse('${rows.first['sale_date']}');
+      if (dt != null) {
+        String two(int v) => v.toString().padLeft(2, '0');
+        date = '${two(dt.day)}-${two(dt.month)}-${two(dt.year % 100)}';
+      }
+    }
+    final number = saleId.toString().padLeft(2, '0');
+    return 'Invoice_${ShopDefaults.shortName}_${date.isEmpty ? 'NA' : date}_$number.pdf';
+  }
 
   static Future<Uint8List> generate(int saleId) async {
     final db = await DBHelper.instance.database;
@@ -162,7 +209,7 @@ class InvoicePdfGenerator {
       return _InvoiceRow(
         '${item['product_name']}',
         '${_num(qty)} $unitLabel',
-        _taka(price),
+        _rate(price),
         _taka(qty * price),
       );
     }).toList();
@@ -183,14 +230,23 @@ class InvoicePdfGenerator {
       shopName: (settings['shop_name'] ?? '').isEmpty
           ? 'Ahmadia Shop'
           : settings['shop_name']!,
-      shopAddress: settings['shop_address'] ?? '',
-      shopPhone: settings['shop_phone'] ?? '',
+      shopAddress: (settings['shop_address'] ?? '').trim().isEmpty
+          ? ShopDefaults.address
+          : settings['shop_address']!.trim(),
+      shopPhone: (settings['shop_phone'] ?? '').trim().isEmpty
+          ? ShopDefaults.phone
+          : settings['shop_phone']!.trim(),
       logo: logo,
       logoIsBrand: logoIsBrand,
       customerName:
           customer == null ? 'নগদ ক্রেতা' : (customer['name'] as String? ?? ''),
       customerContact: contactParts.join(' • '),
       saleType: saleTypeRaw == 'wholesale' ? 'পাইকারি' : 'খুচরা',
+      invoiceNo: saleId.toString().padLeft(2, '0'),
+      dateText: _dateText('${sale['sale_date']}'),
+      payLabel: (!isCredit || productsTotal - paid <= 0)
+          ? 'পরিশোধিত'
+          : (paid > 0 ? 'আংশিক পরিশোধ' : 'সম্পূর্ণ বাকি'),
       rows: rows,
       productsTotal: productsTotal,
       courier: courierCharge,
@@ -303,6 +359,57 @@ class InvoicePdfGenerator {
     return h;
   }
 
+  // টেক্সটের প্রস্থ মাপা (স্ট্যাটাস ক্যাপসুলের মাপ ঠিক করতে)
+  static double _textWidth(String text, double size, {bool bold = false}) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          fontFamily: _font,
+          fontSize: size,
+          fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    final w = painter.width;
+    painter.dispose();
+    return w;
+  }
+
+  // একাধিক লাইনে ভাঙা অনুচ্ছেদ আঁকে, উচ্চতা ফেরত দেয়
+  static double _paragraph(
+    Canvas canvas,
+    String text,
+    double x,
+    double y,
+    double width, {
+    double size = 9.5,
+    bool bold = false,
+    Color color = AppColors.textSecondary,
+  }) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          fontFamily: _font,
+          fontSize: size,
+          fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
+          color: color,
+          height: 1.35,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: width);
+    painter.paint(canvas, Offset(x, y));
+    final h = painter.height;
+    painter.dispose();
+    return h;
+  }
+
+  // নতুন ডিজাইন: উপরে রঙিন স্ট্রাইপ, লোগো + ইনভয়েস নম্বর/তারিখ/স্ট্যাটাস, তথ্য-কার্ড,
+  // ডোরাকাটা পণ্যের টেবিল, নিচে বাঁয়ে ব্র্যান্ড বক্স ও ডানে মোট হিসাবের বক্স
   static Future<_RenderedPage> _renderChunk(
     _InvoiceData d,
     List<_InvoiceRow> rows,
@@ -314,15 +421,20 @@ class InvoicePdfGenerator {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     canvas.scale(_scale);
-    canvas.drawRect(Rect.fromLTWH(0, 0, _w, 2000), Paint()..color = Colors.white);
+    canvas.drawRect(const Rect.fromLTWH(0, 0, _w, 2000), Paint()..color = Colors.white);
 
-    final left = _margin;
-    final right = _w - _margin;
+    const left = _left;
+    const right = _right;
+    final hasDue = d.due > 0;
 
-    // ---------- হেডার: বাঁয়ে লোগো/দোকানের তথ্য, ডানে ইনভয়েস নম্বর ও তারিখ ----------
+    // ---------- উপরের রঙিন স্ট্রাইপ ----------
+    canvas.drawRect(const Rect.fromLTWH(0, 0, _w, 8), Paint()..color = _green);
+    canvas.drawRect(const Rect.fromLTWH(_w - 170, 0, 170, 8), Paint()..color = _orange);
+
+    // ---------- হেডার: বাঁয়ে লোগো ও যোগাযোগ, ডানে ইনভয়েস তথ্য ----------
     const logoBoxW = 230.0;
-    const logoBoxH = 56.0;
-    const headerTop = 14.0;
+    const logoBoxH = 52.0;
+    const logoTop = 20.0;
     if (d.logo != null) {
       final lw = d.logo!.width.toDouble();
       final lh = d.logo!.height.toDouble();
@@ -331,224 +443,222 @@ class InvoicePdfGenerator {
       final dh = lh * fitScale;
       paintImage(
         canvas: canvas,
-        rect: Rect.fromLTWH(left, headerTop + (logoBoxH - dh) / 2, dw, dh),
+        rect: Rect.fromLTWH(left, logoTop + (logoBoxH - dh) / 2, dw, dh),
         image: d.logo!,
         fit: BoxFit.contain,
         filterQuality: FilterQuality.high,
       );
       if (!d.logoIsBrand) {
         // নিজের বেছে নেওয়া লোগো হলে পাশে দোকানের নাম
-        _text(canvas, d.shopName, left + dw + 12, headerTop + (logoBoxH - 26) / 2,
+        _text(canvas, d.shopName, left + dw + 12, logoTop + (logoBoxH - 26) / 2,
             size: 20, bold: true, color: _green, maxWidth: 300 - dw);
       }
     } else {
-      _text(canvas, d.shopName, left, headerTop + 12,
+      _text(canvas, d.shopName, left, logoTop + 10,
           size: 22, bold: true, color: _green, maxWidth: 400);
     }
-    var addrY = headerTop + logoBoxH + 4;
-    if (d.shopAddress.isNotEmpty) {
-      addrY += _text(canvas, d.shopAddress, left, addrY,
-          size: 10, color: AppColors.textSecondary, maxWidth: 440);
-    }
-    if (d.shopPhone.isNotEmpty) {
-      _text(canvas, 'ফোন: ${d.shopPhone}', left, addrY,
-          size: 10, color: AppColors.textSecondary, maxWidth: 440);
+
+    // ঠিকানা ও ফোন এক লাইনে — নিচের রেখার সাথে মিশে যায় না
+    final contactLine = [
+      if (d.shopAddress.isNotEmpty) d.shopAddress,
+      if (d.shopPhone.isNotEmpty) 'ফোন: ${d.shopPhone}',
+    ].join('   •   ');
+    if (contactLine.isNotEmpty) {
+      _text(canvas, contactLine, left, 76,
+          size: 10, color: AppColors.textSecondary, maxWidth: 470);
     }
 
-    _text(canvas, 'ইনভয়েস', right, headerTop, size: 21, bold: true, color: _green, align: TextAlign.right);
+    _text(canvas, 'ইনভয়েস', right, 16,
+        size: 26, bold: true, color: _green, align: TextAlign.right);
     _text(
         canvas,
-        '#${d.saleId}${pageCount > 1 ? '  •  পৃষ্ঠা $pageNo/$pageCount' : ''}',
+        '#${d.invoiceNo}   •   ${d.dateText}${pageCount > 1 ? '   •   পৃষ্ঠা $pageNo/$pageCount' : ''}',
         right,
-        headerTop + 30,
-        size: 12.5,
+        50,
+        size: 12,
         bold: true,
         align: TextAlign.right);
-    _text(canvas, 'তারিখ: ${d.date}', right, headerTop + 50,
-        size: 10.5, color: AppColors.textSecondary, align: TextAlign.right);
+    final statusText = hasDue ? 'বাকি আছে' : 'পরিশোধিত';
+    final pillW = _textWidth(statusText, 10.5, bold: true) + 26;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+          Rect.fromLTWH(right - pillW, 70, pillW, 20), const Radius.circular(10)),
+      Paint()..color = hasDue ? _redBg : _greenBg,
+    );
+    _text(canvas, statusText, right - pillW / 2, 73,
+        size: 10.5, bold: true, color: hasDue ? _red : _green, align: TextAlign.center);
 
     // লোগোর রঙে আলংকারিক রেখা
-    canvas.drawRect(Rect.fromLTWH(left, 96, right - left, 3), Paint()..color = _green);
-    canvas.drawRect(Rect.fromLTWH(left, 96, 96, 3), Paint()..color = _orange);
+    canvas.drawRect(Rect.fromLTRB(left, 98, right, 101), Paint()..color = _green);
+    canvas.drawRect(const Rect.fromLTWH(left, 98, 90, 3), Paint()..color = _orange);
 
-    // ---------- তথ্য বক্স (কাস্টমার | পেমেন্ট) ----------
+    // ---------- তথ্য-কার্ড (বিল প্রাপক | বিক্রয়ের ধরন ও পেমেন্ট) ----------
+    const cardTop = 112.0;
+    const cardH = 50.0;
     const gap = 12.0;
-    final boxW = (right - left - gap) / 2;
-    const boxTop = 112.0;
-    const boxH = 50.0;
-    final infoPaint = Paint()..color = _tint;
-
+    final cardW = (right - left - gap) / 2;
+    final cardPaint = Paint()..color = _tint;
     canvas.drawRRect(
       RRect.fromRectAndRadius(
-          Rect.fromLTWH(left, boxTop, boxW, boxH), const Radius.circular(10)),
-      infoPaint,
+          Rect.fromLTWH(left, cardTop, cardW, cardH), const Radius.circular(9)),
+      cardPaint,
     );
-    _text(canvas, 'বিল প্রাপক', left + 12, boxTop + 6,
+    _text(canvas, 'বিল প্রাপক', left + 14, cardTop + 6,
         size: 9.5, color: AppColors.textSecondary);
-    _text(canvas, d.customerName, left + 12, boxTop + 18,
-        size: 12.5, bold: true, maxWidth: boxW - 24);
+    _text(canvas, d.customerName, left + 14, cardTop + 19,
+        size: 13, bold: true, maxWidth: cardW - 28);
     if (d.customerContact.isNotEmpty) {
-      _text(canvas, d.customerContact, left + 12, boxTop + 34,
-          size: 10, color: AppColors.textSecondary, maxWidth: boxW - 24);
+      _text(canvas, d.customerContact, left + 14, cardTop + 35,
+          size: 9.5, color: AppColors.textSecondary, maxWidth: cardW - 28);
     }
-
-    final box2Left = left + boxW + gap;
+    final card2Left = left + cardW + gap;
     canvas.drawRRect(
       RRect.fromRectAndRadius(
-          Rect.fromLTWH(box2Left, boxTop, boxW, boxH), const Radius.circular(10)),
-      infoPaint,
+          Rect.fromLTWH(card2Left, cardTop, cardW, cardH), const Radius.circular(9)),
+      cardPaint,
     );
-    final isDue = d.due > 0;
-    _text(canvas, 'পেমেন্ট অবস্থা', box2Left + 12, boxTop + 6,
+    _text(canvas, 'বিক্রয়ের ধরন', card2Left + 14, cardTop + 6,
         size: 9.5, color: AppColors.textSecondary);
-    _text(canvas, isDue ? 'বাকি আছে' : 'পরিশোধিত', box2Left + 12, boxTop + 18,
+    _text(canvas, d.saleType, card2Left + 14, cardTop + 21, size: 12.5, bold: true);
+    _text(canvas, 'পেমেন্ট', card2Left + cardW / 2 + 4, cardTop + 6,
+        size: 9.5, color: AppColors.textSecondary);
+    _text(canvas, d.payLabel, card2Left + cardW / 2 + 4, cardTop + 21,
         size: 12.5,
         bold: true,
-        color: isDue ? AppColors.danger : AppColors.success);
-    _text(canvas, 'বিক্রয়ের ধরন: ${d.saleType}', box2Left + 12, boxTop + 34,
-        size: 10, color: AppColors.textSecondary, maxWidth: boxW - 24);
+        color: hasDue ? _red : _green,
+        maxWidth: cardW / 2 - 18);
 
     // ---------- পণ্যের টেবিল ----------
-    var y = 172.0;
-    const colNo = 30.0;
-    const colQty = 112.0;
-    const colPrice = 84.0;
-    const colTotal = 96.0;
-    final totalColLeft = right - colTotal;
-    final priceColLeft = totalColLeft - colPrice;
-    final qtyColLeft = priceColLeft - colQty;
-    final nameColLeft = left + colNo;
-    final nameMaxW = qtyColLeft - nameColLeft - 8;
-
+    const tableTop = cardTop + cardH + 12;
     const headerH = 24.0;
+    const nameLeft = left + 34;
+    const totRight = right;
+    const rateRight = right - 110;
+    const qtyRight = rateRight - 100;
+
     canvas.drawRRect(
       RRect.fromRectAndCorners(
-        Rect.fromLTWH(left, y, right - left, headerH),
+        Rect.fromLTWH(left, tableTop, right - left, headerH),
         topLeft: const Radius.circular(8),
         topRight: const Radius.circular(8),
       ),
       Paint()..color = _green,
     );
-    const headerStyleSize = 10.5;
-    _text(canvas, '#', left + 8, y + 5,
-        size: headerStyleSize, bold: true, color: Colors.white);
-    _text(canvas, 'পণ্যের নাম', nameColLeft, y + 5,
-        size: headerStyleSize, bold: true, color: Colors.white);
-    _text(canvas, 'পরিমাণ', priceColLeft - 8, y + 5,
-        size: headerStyleSize,
-        bold: true,
-        color: Colors.white,
-        align: TextAlign.right);
-    _text(canvas, 'একক দাম', totalColLeft - 8, y + 5,
-        size: headerStyleSize,
-        bold: true,
-        color: Colors.white,
-        align: TextAlign.right);
-    _text(canvas, 'মোট', right - 8, y + 5,
-        size: headerStyleSize,
-        bold: true,
-        color: Colors.white,
-        align: TextAlign.right);
+    _text(canvas, '#', left + 12, tableTop + 5, size: 10.5, bold: true, color: Colors.white);
+    _text(canvas, 'পণ্যের নাম', nameLeft, tableTop + 5,
+        size: 10.5, bold: true, color: Colors.white);
+    _text(canvas, 'পরিমাণ', qtyRight, tableTop + 5,
+        size: 10.5, bold: true, color: Colors.white, align: TextAlign.right);
+    _text(canvas, 'রেট', rateRight, tableTop + 5,
+        size: 10.5, bold: true, color: Colors.white, align: TextAlign.right);
+    _text(canvas, 'মোট', totRight - 12, tableTop + 5,
+        size: 10.5, bold: true, color: Colors.white, align: TextAlign.right);
 
-    final zebraPaint = Paint()..color = const Color(0xFFF7F8FA);
+    final zebraPaint = Paint()..color = _zebra;
     final linePaint = Paint()
       ..color = AppColors.border
       ..strokeWidth = 0.8;
-    final rowsTop = y + headerH;
+    const rowsTop = tableTop + headerH;
     for (var i = 0; i < rows.length; i++) {
       final row = rows[i];
-      final rowTop = rowsTop + i * _rowH;
+      final rowTop = rowsTop + i * _rowHeight;
       if (i.isOdd) {
-        canvas.drawRect(Rect.fromLTWH(left, rowTop, right - left, _rowH), zebraPaint);
+        canvas.drawRect(Rect.fromLTWH(left, rowTop, right - left, _rowHeight), zebraPaint);
       }
-      canvas.drawLine(Offset(left, rowTop + _rowH),
-          Offset(right, rowTop + _rowH), linePaint);
-      _text(canvas, '${startIndex + i + 1}', left + 8, rowTop + 4, size: 11);
-      _text(canvas, row.name, nameColLeft, rowTop + 4,
-          size: 11, maxWidth: nameMaxW);
-      _text(canvas, row.qty, priceColLeft - 8, rowTop + 4,
-          size: 11, maxWidth: colQty - 16, align: TextAlign.right);
-      _text(canvas, row.price, totalColLeft - 8, rowTop + 4,
-          size: 11, maxWidth: colPrice - 16, align: TextAlign.right);
-      _text(canvas, row.total, right - 8, rowTop + 4,
-          size: 11, bold: true, maxWidth: colTotal - 16, align: TextAlign.right);
+      canvas.drawLine(Offset(left, rowTop + _rowHeight),
+          Offset(right, rowTop + _rowHeight), linePaint);
+      _text(canvas, '${startIndex + i + 1}', left + 12, rowTop + 5,
+          size: 11, color: AppColors.textSecondary);
+      _text(canvas, row.name, nameLeft, rowTop + 5,
+          size: 11.5, maxWidth: qtyRight - nameLeft - 110);
+      _text(canvas, row.qty, qtyRight, rowTop + 5,
+          size: 11.5, align: TextAlign.right);
+      _text(canvas, row.price, rateRight, rowTop + 5,
+          size: 11.5, align: TextAlign.right);
+      _text(canvas, row.total, totRight - 12, rowTop + 5,
+          size: 11.5, bold: true, align: TextAlign.right);
     }
+    final rowsBottom = rowsTop + rows.length * _rowHeight;
 
-    y = rowsTop + rows.length * _rowH + 12;
-
-    // ---------- মোট হিসাব (শুধু শেষ পাতায়) ----------
+    // ---------- নিচের অংশ ----------
+    final blockTop = rowsBottom + 14;
+    double bottom;
     if (isLast) {
-      const totalsW = 250.0;
-      final bx = right - totalsW;
-      final hasCourier = d.courier > 0;
-      final double totalsH = 8.0 +
-          18 +
-          (hasCourier ? 18 : 0) +
-          8 +
-          26 +
-          18 +
-          (d.isCredit ? 18 : 0) +
-          8;
-
-      if (hasCourier) {
-        _text(canvas, 'কুরিয়ার চার্জ গ্রাহক বহন করবেন', left, y + 8,
-            size: 9.5, color: AppColors.textSecondary, maxWidth: bx - left - 12);
-      }
-
+      // বাঁয়ে ব্র্যান্ড বক্স
+      const brandW = right - left - 300;
       canvas.drawRRect(
         RRect.fromRectAndRadius(
-            Rect.fromLTWH(bx, y, totalsW, totalsH), const Radius.circular(10)),
+            Rect.fromLTWH(left, blockTop, brandW, _brandBoxH), const Radius.circular(12)),
         Paint()..color = _tint,
       );
+      canvas.drawRect(
+          Rect.fromLTWH(left, blockTop + 14, 4, _brandBoxH - 28), Paint()..color = _orange);
+      const mx = left + 22;
+      final diamond = Path()
+        ..moveTo(mx + 4, blockTop + 16)
+        ..lineTo(mx + 8, blockTop + 20)
+        ..lineTo(mx + 4, blockTop + 24)
+        ..lineTo(mx, blockTop + 20)
+        ..close();
+      canvas.drawPath(diamond, Paint()..color = _orange);
+      _text(canvas, 'বিশ্বাসই আমাদের ভিত্তি', mx + 16, blockTop + 10,
+          size: 15, bold: true, color: _green, maxWidth: brandW - 60);
+      var textY = blockTop + 36;
+      textY += _paragraph(
+              canvas,
+              'Ahmadia Shop — Pure & authentic organic products. Trusted by people who value quality.',
+              mx,
+              textY,
+              brandW - 44) +
+          2;
+      _paragraph(canvas, 'We deliver what we promise — no compromise.', mx, textY,
+          brandW - 44,
+          bold: true);
+      _text(canvas, 'কেনাকাটার জন্য ধন্যবাদ।', mx, blockTop + _brandBoxH - 26,
+          size: 10.5, color: _green);
 
-      var ly = y + 8;
-      void line(String label, String value,
-          {bool bold = false,
-          double size = 11,
-          Color color = AppColors.textPrimary,
-          double step = 18}) {
-        _text(canvas, label, bx + 12, ly, size: size, bold: bold, color: color);
-        _text(canvas, value, bx + totalsW - 12, ly,
-            size: size, bold: bold, color: color, align: TextAlign.right);
-        ly += step;
+      // ডানে মোট হিসাব
+      const totalsLeft = right - 282;
+      var yy = blockTop + 2;
+      void summaryRow(String label, String value) {
+        _text(canvas, label, totalsLeft + 8, yy,
+            size: 11, color: AppColors.textSecondary);
+        _text(canvas, value, right - 8, yy, size: 11, align: TextAlign.right);
+        yy += 20;
       }
 
-      line('পণ্যের মোট', _taka(d.productsTotal));
-      if (hasCourier) line('কুরিয়ার চার্জ', _taka(d.courier));
-      canvas.drawLine(Offset(bx + 12, ly + 2), Offset(bx + totalsW - 12, ly + 2),
-          Paint()
-            ..color = AppColors.border
-            ..strokeWidth = 1);
-      ly += 8;
-      line('সর্বমোট', _taka(d.grandTotal),
-          bold: true, size: 14, color: _green, step: 26);
-      line('পরিশোধিত', _taka(d.paid));
-      if (d.isCredit) {
-        line('বাকি', _taka(d.due),
-            bold: true, color: AppColors.danger);
+      summaryRow('পণ্যের মোট', _taka(d.productsTotal));
+      if (d.courier > 0) summaryRow('কুরিয়ার চার্জ', _taka(d.courier));
+      yy += 2;
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(Rect.fromLTWH(totalsLeft, yy, right - totalsLeft, 36),
+            const Radius.circular(10)),
+        Paint()..color = _green,
+      );
+      _text(canvas, 'সর্বমোট', totalsLeft + 14, yy + 9,
+          size: 12, bold: true, color: Colors.white);
+      _text(canvas, _taka(d.grandTotal), right - 14, yy + 6,
+          size: 17, bold: true, color: Colors.white, align: TextAlign.right);
+      yy += 44;
+      summaryRow('পরিশোধিত', _taka(d.paid));
+      if (hasDue) {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(Rect.fromLTWH(totalsLeft, yy - 2, right - totalsLeft, 24),
+              const Radius.circular(8)),
+          Paint()..color = _redBg,
+        );
+        _text(canvas, 'বাকি', totalsLeft + 8, yy + 2, size: 12, bold: true, color: _red);
+        _text(canvas, _taka(d.due), right - 8, yy + 1,
+            size: 13, bold: true, color: _red, align: TextAlign.right);
+        yy += 24;
       }
-
-      y += totalsH + 14;
+      bottom = math.max(blockTop + _brandBoxH, yy);
     } else {
-      _text(canvas, 'পরবর্তী পৃষ্ঠায় চলবে…', right, y,
+      _text(canvas, 'পরবর্তী পৃষ্ঠায় চলবে…', right, blockTop,
           size: 10, color: AppColors.textSecondary, align: TextAlign.right);
-      y += 18;
+      bottom = blockTop + 18;
     }
-
-    // ---------- ফুটার ----------
-    canvas.drawLine(Offset(left, y), Offset(right, y), linePaint);
-    y += 8;
-    final footerH = _text(
-      canvas,
-      isLast ? 'কেনাকাটার জন্য ধন্যবাদ — ${d.shopName}' : d.shopName,
-      _w / 2,
-      y,
-      size: 10.5,
-      color: AppColors.textSecondary,
-      maxWidth: right - left,
-      align: TextAlign.center,
-    );
-    final totalHeight = y + footerH + 14;
+    final totalHeight = bottom + 12;
 
     final picture = recorder.endRecording();
     final widthPx = (_w * _scale).round();

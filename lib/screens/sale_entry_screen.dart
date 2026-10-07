@@ -37,8 +37,18 @@ class _SaleItemRow {
   ProductUnit? selectedUnit;
   List<ProductUnit> availableUnits = [];
   double quantity = 0; // নির্বাচিত unit-এ (pack হলে pack-সংখ্যা, নাহলে base-এ)
-  double unitPrice = 0;
+  double unitPrice = 0; // নির্বাচিত unit-এর প্রতি এককের দাম (সেভ ও হিসাব এটা দিয়েই)
+  // দামের ঘরে যে সংখ্যা লেখা — priceIsPerBase হলে সেটা প্রতি base unit (যেমন কেজি)
+  // দাম, নাহলে প্রতি নির্বাচিত unit-এর দাম। unitPrice এটা থেকে স্বয়ংক্রিয় হিসাব হয়।
+  double priceInput = 0;
+  bool priceIsPerBase = false;
   final TextEditingController unitPriceController = TextEditingController();
+
+  void recomputePrice() {
+    unitPrice = (selectedUnit != null && priceIsPerBase)
+        ? ((priceInput * conversionFactor) * 1000000).round() / 1000000
+        : priceInput;
+  }
 
   // এই row-এ যে unit-ই নির্বাচিত হোক, কত base-unit লাগবে তার হিসাব
   double get conversionFactor => selectedUnit?.conversionFactorToBase ?? 1;
@@ -110,7 +120,8 @@ class _SaleEntryScreenState extends State<SaleEntryScreen> {
         ..productName = product['name'] as String? ?? ''
         ..baseUnit = product['unit'] as String? ?? ''
         ..quantity = (si['quantity'] as num).toDouble()
-        ..unitPrice = (si['unit_price'] as num).toDouble();
+        ..unitPrice = (si['unit_price'] as num).toDouble()
+        ..priceInput = (si['unit_price'] as num).toDouble();
       row.unitPriceController.text = _formatPrice(row.unitPrice);
 
       final currentStock = (product['stock'] as num?)?.toDouble() ?? 0;
@@ -191,8 +202,9 @@ class _SaleEntryScreenState extends State<SaleEntryScreen> {
       }
       item.selectedUnit = defaultUnit;
       if (defaultUnit?.sellingPrice != null) {
-        item.unitPrice = defaultUnit!.sellingPrice!;
-        item.unitPriceController.text = _formatPrice(item.unitPrice);
+        item.priceIsPerBase = false;
+        item.priceInput = defaultUnit!.sellingPrice!;
+        _showPrice(item);
       }
     });
   }
@@ -200,6 +212,23 @@ class _SaleEntryScreenState extends State<SaleEntryScreen> {
   String _formatPrice(double price) => price == price.roundToDouble()
       ? price.toInt().toString()
       : price.toString();
+
+  double _round6(double v) => (v * 1000000).round() / 1000000;
+
+  // priceInput থেকে unitPrice হিসাব করে দামের ঘরে দেখানো
+  void _showPrice(_SaleItemRow item) {
+    item.recomputePrice();
+    item.unitPriceController.text =
+        item.priceInput > 0 ? _formatPrice(item.priceInput) : '';
+  }
+
+  // "প্রতি base unit (কেজি)" দাম বসানো — বর্তমান unit ও basis অনুযায়ী ঘরের মান বদলে নেয়
+  void _setPricePerBase(_SaleItemRow item, double perBase) {
+    item.priceInput = (item.selectedUnit == null || item.priceIsPerBase)
+        ? perBase
+        : _round6(perBase * item.conversionFactor);
+    _showPrice(item);
+  }
 
   Future<void> _save() async {
     final validItems =
@@ -328,9 +357,12 @@ class _SaleEntryScreenState extends State<SaleEntryScreen> {
                         item.availableStock = (product['stock'] as num).toDouble();
                         item.selectedUnit = null;
                         item.availableUnits = [];
+                        item.priceIsPerBase = false;
                         if (autoPrice != null) {
-                          item.unitPrice = (autoPrice as num).toDouble();
-                          item.unitPriceController.text = _formatPrice(item.unitPrice);
+                          item.priceInput = (autoPrice as num).toDouble();
+                          _showPrice(item);
+                        } else {
+                          item.recomputePrice();
                         }
                       });
                       _loadUnitsForRow(item, val as int);
@@ -362,10 +394,22 @@ class _SaleEntryScreenState extends State<SaleEntryScreen> {
                 ],
                 onChanged: (u) {
                   setState(() {
+                    // দামের "প্রতি base unit" মান ধরে রাখা — unit বদলালে দাম নিজে
+                    // থেকে নতুন এককে রূপান্তর হয় (যেমন কেজি ৳১২০ → গ্রাম ৳০.১২)
+                    final oldFactor = item.conversionFactor;
+                    final perBase = oldFactor > 0 ? item.unitPrice / oldFactor : 0.0;
                     item.selectedUnit = u;
                     if (u?.sellingPrice != null) {
-                      item.unitPrice = u!.sellingPrice!;
-                      item.unitPriceController.text = _formatPrice(item.unitPrice);
+                      item.priceIsPerBase = false;
+                      item.priceInput = u!.sellingPrice!;
+                      _showPrice(item);
+                    } else {
+                      item.priceIsPerBase = u != null && u.conversionFactorToBase < 1;
+                      if (perBase > 0) {
+                        _setPricePerBase(item, _round6(perBase));
+                      } else {
+                        _showPrice(item);
+                      }
                     }
                   });
                 },
@@ -389,13 +433,45 @@ class _SaleEntryScreenState extends State<SaleEntryScreen> {
                     controller: item.unitPriceController,
                     keyboardType: TextInputType.number,
                     decoration: InputDecoration(
-                        labelText: 'প্রতি ${item.displayUnitLabel} মূল্য'),
-                    onChanged: (val) =>
-                        setState(() => item.unitPrice = double.tryParse(val) ?? 0),
+                        labelText:
+                            'প্রতি ${item.priceIsPerBase ? item.baseUnit : item.displayUnitLabel} মূল্য'),
+                    onChanged: (val) => setState(() {
+                      item.priceInput = double.tryParse(val) ?? 0;
+                      item.recomputePrice();
+                    }),
                   ),
                 ),
               ],
             ),
+            if (item.selectedUnit != null && item.conversionFactor != 1) ...[
+              const SizedBox(height: 8),
+              SegmentedButton<bool>(
+                segments: [
+                  ButtonSegment(
+                      value: false, label: Text('প্রতি ${item.displayUnitLabel}')),
+                  ButtonSegment(value: true, label: Text('প্রতি ${item.baseUnit}')),
+                ],
+                selected: {item.priceIsPerBase},
+                onSelectionChanged: (s) => setState(() {
+                  final toBase = s.first;
+                  if (toBase == item.priceIsPerBase) return;
+                  final f = item.conversionFactor;
+                  item.priceInput =
+                      _round6(toBase ? item.priceInput / f : item.priceInput * f);
+                  item.priceIsPerBase = toBase;
+                  _showPrice(item);
+                }),
+              ),
+              if (item.unitPrice > 0)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                      'প্রতি ${item.displayUnitLabel}: ৳${_formatPrice(_round6(item.unitPrice))}'
+                      '  •  প্রতি ${item.baseUnit}: ৳${_formatPrice(_round6(item.unitPrice / item.conversionFactor))}',
+                      style: const TextStyle(
+                          fontSize: 12, color: AppColors.textSecondary)),
+                ),
+            ],
             if (item.baseQuantity > item.availableStock && item.availableStock > 0)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
@@ -461,8 +537,7 @@ class _SaleEntryScreenState extends State<SaleEntryScreen> {
                 final autoPrice =
                     _saleType == 'wholesale' ? product['wholesale_price'] : product['retail_price'];
                 if (autoPrice != null) {
-                  item.unitPrice = (autoPrice as num).toDouble();
-                  item.unitPriceController.text = _formatPrice(item.unitPrice);
+                  _setPricePerBase(item, (autoPrice as num).toDouble());
                 }
               }
               setState(() {});

@@ -82,12 +82,25 @@ class TransactionService {
     required int? createdBy,
   }) async {
     final db = await _dbHelper.database;
+    return await db.transaction((txn) => _recordPurchaseInTxn(txn, supplierId: supplierId, items: items, paidAmount: paidAmount, isCredit: isCredit, purchaseDate: purchaseDate, createdBy: createdBy));
+  }
+
+  /// ওপরের মেথডের মূল কাজ — অন্য transaction-এর ভেতর থেকেও কল করা যায় (edit = delete + record একই transaction-এ)
+  Future<int> _recordPurchaseInTxn(
+    DatabaseExecutor txn, {
+    required int? supplierId,
+    required List<Map<String, dynamic>> items,
+    required double paidAmount,
+    required bool isCredit,
+    required String purchaseDate,
+    required int? createdBy,
+  }) async {
     double totalAmount = 0;
     for (final item in items) {
       totalAmount += (item['quantity'] as double) * (item['unit_cost'] as double);
     }
 
-    return await db.transaction((txn) async {
+    
       final purchaseSyncId = generateSyncId();
       final purchaseId = await txn.insert('purchases', {
         'supplier_id': supplierId,
@@ -108,6 +121,7 @@ class TransactionService {
             await _conversionFactorFor(txn, productUnitId);
 
         // stock/FIFO সবসময় base unit-এ — pack-এ কেনা হলে কনভার্ট করা হচ্ছে
+        QuantityMath.requireRepresentable(displayQty, conversionFactor);
         final baseQty = QuantityMath.toBase(displayQty, conversionFactor);
         // per-base-unit দাম round করা হয় না — round করলে (যেমন ৭টার প্যাক
         // ১০০ টাকা → ১৪.২৮৬) ইনভেন্টরি/লাভে প্রতি প্যাকে সামান্য গরমিল জমে
@@ -138,7 +152,6 @@ class TransactionService {
           purchaseId, 'নতুন ক্রয় এন্ট্রি, মোট: $totalAmount');
 
       return purchaseId;
-    });
   }
 
   // ----------------------------------------------------------
@@ -159,6 +172,21 @@ class TransactionService {
     String saleType = 'retail', // 'retail' অথবা 'wholesale'
   }) async {
     final db = await _dbHelper.database;
+    return await db.transaction((txn) => _recordSaleInTxn(txn, customerId: customerId, items: items, courierCharge: courierCharge, paidAmount: paidAmount, isCredit: isCredit, saleDate: saleDate, createdBy: createdBy, saleType: saleType));
+  }
+
+  /// ওপরের মেথডের মূল কাজ — অন্য transaction-এর ভেতর থেকেও কল করা যায় (edit = delete + record একই transaction-এ)
+  Future<int> _recordSaleInTxn(
+    DatabaseExecutor txn, {
+    required int? customerId,
+    required List<Map<String, dynamic>> items,
+    required double courierCharge,
+    required double paidAmount,
+    required bool isCredit,
+    required String saleDate,
+    required int? createdBy,
+    String saleType = 'retail', // 'retail' অথবা 'wholesale'
+  }) async {
 
     double productsTotal = 0;
     for (final item in items) {
@@ -167,7 +195,7 @@ class TransactionService {
     // কুরিয়ার চার্জ শুধু ইনভয়েসে তথ্যগত — মোট বিক্রয়মূল্যে/ক্যাশে যোগ হবে না
     final totalAmount = productsTotal;
 
-    return await db.transaction((txn) async {
+    
       final saleSyncId = generateSyncId();
       final saleId = await txn.insert('sales', {
         'customer_id': customerId,
@@ -193,6 +221,7 @@ class TransactionService {
             await _conversionFactorFor(txn, productUnitId);
         // stock থেকে বাস্তবে যা কাটা হবে সেটা সবসময় base unit-এ, আর
         // rounding drift এড়াতে QuantityMath দিয়ে round করা হচ্ছে
+        QuantityMath.requireRepresentable(qty, conversionFactor);
         final baseQty =
             QuantityMath.toBase(qty, conversionFactor);
 
@@ -248,7 +277,6 @@ class TransactionService {
           'নতুন বিক্রয়, মোট: $totalAmount');
 
       return saleId;
-    });
   }
 
   // ----------------------------------------------------------
@@ -510,6 +538,7 @@ class TransactionService {
     return await db.transaction((txn) async {
       final conversionFactor =
           await _conversionFactorFor(txn, productUnitId);
+      QuantityMath.requireRepresentable(quantity, conversionFactor);
       final baseQty = QuantityMath.toBase(quantity, conversionFactor);
       double totalCost = 0;
 
@@ -583,7 +612,8 @@ class TransactionService {
   // ----------------------------------------------------------
   Future<void> editStockAdjustment({
     required int adjustmentId,
-    required double newQuantityAbs, // ধনাত্মক সংখ্যা, একই unit-এ (দিক আগেরটাই থাকবে)
+    required double newQuantityAbs, // ধনাত্মক সংখ্যা, newProductUnitId-এর এককে (দিক আগেরটাই থাকবে)
+    required int? newProductUnitId, // null = base unit (যেমন কেজি), নাহলে বেছে নেওয়া unit (যেমন গ্রাম)
     required String reason,
     String? note,
     required String date,
@@ -597,12 +627,13 @@ class TransactionService {
       if (rows.isEmpty) throw Exception('এন্ট্রি খুঁজে পাওয়া যায়নি');
       final old = rows.first;
       final productId = old['product_id'] as int;
-      final productUnitId = old['product_unit_id'] as int?;
+      final productUnitId = newProductUnitId;
       final oldBase = (old['base_quantity'] as num).toDouble();
       final oldCost = (old['total_cost'] as num?)?.toDouble() ?? 0;
       final isLoss = oldBase < 0;
 
       final factor = await _conversionFactorFor(txn, productUnitId);
+      QuantityMath.requireRepresentable(newQuantityAbs, factor);
       final newSigned = isLoss ? -newQuantityAbs : newQuantityAbs;
       final newBase = QuantityMath.toBase(newSigned, factor);
       final deltaBase = QuantityMath.round(newBase - oldBase);
@@ -657,8 +688,34 @@ class TransactionService {
             await addBatch(deltaBase, avgUnitCost);
             newCost = oldCost + QuantityMath.round(deltaBase * avgUnitCost);
           } else {
-            final removed = await consumeFifo(-deltaBase);
-            newCost = oldCost - removed;
+            // বাড়তি-পাওয়া স্টক কমানো: "ক্রয়-ছাড়া" ব্যাচ (সমন্বয়/ফেরত থেকে আসা), যেগুলোর
+            // দাম এই এন্ট্রির দামের সবচেয়ে কাছাকাছি, সেখান থেকে কাটা হয় — সবচেয়ে পুরনো
+            // ক্রয়ের ব্যাচ থেকে কাটলে লাভ-ক্ষতির হিসাব ভেঙে যেত
+            var need = -deltaBase;
+            var removedCost = 0.0;
+            final candidates = await txn.rawQuery('''
+              SELECT id, remaining_quantity, unit_cost FROM purchase_batches
+              WHERE product_id = ? AND purchase_id IS NULL AND remaining_quantity > 0
+              ORDER BY ABS(unit_cost - ?) ASC, id DESC
+            ''', [productId, avgUnitCost]);
+            for (final b in candidates) {
+              if (need <= 0) break;
+              final rem = (b['remaining_quantity'] as num).toDouble();
+              final take = need <= rem ? need : rem;
+              removedCost += take * (b['unit_cost'] as num).toDouble();
+              await txn.update(
+                  'purchase_batches',
+                  {'remaining_quantity': QuantityMath.subtract(rem, take)},
+                  where: 'id = ?',
+                  whereArgs: [b['id']]);
+              need = QuantityMath.subtract(need, take);
+            }
+            if (need > 0.0000001 || removedCost > oldCost + 0.01) {
+              throw Exception(
+                  'এই বাড়তি স্টকের কিছু অংশ ইতিমধ্যে বিক্রি/ব্যবহার হয়ে গেছে, তাই পরিমাণ এত কমানো যাচ্ছে না। '
+                  'বদলে নতুন একটা "নষ্ট/ঘাটতি" সমন্বয় এন্ট্রি দিন।');
+            }
+            newCost = oldCost - removedCost;
           }
         }
         if (newCost < 0) newCost = 0;
@@ -667,6 +724,7 @@ class TransactionService {
       await txn.update(
           'stock_adjustments',
           {
+            'product_unit_id': productUnitId,
             'quantity': newSigned,
             'base_quantity': newBase,
             'total_cost': newCost,
@@ -705,7 +763,16 @@ class TransactionService {
     required int? deletedBy,
   }) async {
     final db = await _dbHelper.database;
-    await db.transaction((txn) async {
+    await db.transaction((txn) => _deleteSaleInTxn(txn, saleId: saleId, deletedBy: deletedBy));
+  }
+
+  /// ওপরের মেথডের মূল কাজ — অন্য transaction-এর ভেতর থেকেও কল করা যায় (edit = delete + record একই transaction-এ)
+  Future<void> _deleteSaleInTxn(
+    DatabaseExecutor txn, {
+    required int saleId,
+    required int? deletedBy,
+  }) async {
+    
       final saleRows =
           await txn.query('sales', where: 'id = ?', whereArgs: [saleId]);
       if (saleRows.isEmpty) {
@@ -756,7 +823,6 @@ class TransactionService {
 
       await txn.delete('sale_items', where: 'sale_id = ?', whereArgs: [saleId]);
       await txn.delete('sales', where: 'id = ?', whereArgs: [saleId]);
-    });
   }
 
   /// বিক্রয় edit — সহজ ও নিরাপদ approach: পুরনোটা সম্পূর্ণ reverse করে
@@ -774,17 +840,23 @@ class TransactionService {
     required String saleType,
     required String saleDate,
   }) async {
-    await deleteSale(saleId: saleId, deletedBy: editedBy);
-    return recordSale(
-      customerId: customerId,
-      items: items,
-      courierCharge: courierCharge,
-      paidAmount: paidAmount,
-      isCredit: isCredit,
-      saleType: saleType,
-      saleDate: saleDate,
-      createdBy: editedBy,
-    );
+    // একই transaction-এ পুরনোটা মুছে নতুনটা তৈরি — নতুনটা ব্যর্থ হলে (যেমন স্টক
+    // কম) পুরনো বিক্রয়ও যেমন ছিল তেমনই থাকে, কিছু হারায় না
+    final db = await _dbHelper.database;
+    return await db.transaction((txn) async {
+      await _deleteSaleInTxn(txn, saleId: saleId, deletedBy: editedBy);
+      return _recordSaleInTxn(
+        txn,
+        customerId: customerId,
+        items: items,
+        courierCharge: courierCharge,
+        paidAmount: paidAmount,
+        isCredit: isCredit,
+        saleType: saleType,
+        saleDate: saleDate,
+        createdBy: editedBy,
+      );
+    });
   }
 
   // ----------------------------------------------------------
@@ -800,7 +872,16 @@ class TransactionService {
     required int? deletedBy,
   }) async {
     final db = await _dbHelper.database;
-    await db.transaction((txn) async {
+    await db.transaction((txn) => _deletePurchaseInTxn(txn, purchaseId: purchaseId, deletedBy: deletedBy));
+  }
+
+  /// ওপরের মেথডের মূল কাজ — অন্য transaction-এর ভেতর থেকেও কল করা যায় (edit = delete + record একই transaction-এ)
+  Future<void> _deletePurchaseInTxn(
+    DatabaseExecutor txn, {
+    required int purchaseId,
+    required int? deletedBy,
+  }) async {
+    
       final purchaseRows = await txn
           .query('purchases', where: 'id = ?', whereArgs: [purchaseId]);
       if (purchaseRows.isEmpty) {
@@ -829,7 +910,6 @@ class TransactionService {
       await txn.delete('purchase_batches',
           where: 'purchase_id = ?', whereArgs: [purchaseId]);
       await txn.delete('purchases', where: 'id = ?', whereArgs: [purchaseId]);
-    });
   }
 
   Future<int> editPurchase({
@@ -841,14 +921,18 @@ class TransactionService {
     required bool isCredit,
     required String purchaseDate,
   }) async {
-    await deletePurchase(purchaseId: purchaseId, deletedBy: editedBy);
-    return recordPurchase(
-      supplierId: supplierId,
-      items: items,
-      paidAmount: paidAmount,
-      isCredit: isCredit,
-      purchaseDate: purchaseDate,
-      createdBy: editedBy,
-    );
+    final db = await _dbHelper.database;
+    return await db.transaction((txn) async {
+      await _deletePurchaseInTxn(txn, purchaseId: purchaseId, deletedBy: editedBy);
+      return _recordPurchaseInTxn(
+        txn,
+        supplierId: supplierId,
+        items: items,
+        paidAmount: paidAmount,
+        isCredit: isCredit,
+        purchaseDate: purchaseDate,
+        createdBy: editedBy,
+      );
+    });
   }
 }

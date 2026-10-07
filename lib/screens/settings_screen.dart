@@ -12,6 +12,7 @@ import '../database/auth_service.dart';
 import '../database/backup_service.dart';
 import '../database/db_helper.dart';
 import '../utils/app_theme.dart';
+import '../utils/shop_defaults.dart';
 import 'activity_log_screen.dart';
 import 'login_screen.dart';
 
@@ -69,8 +70,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final map = {for (final r in rows) r['key'] as String: r['value'] as String? ?? ''};
     setState(() {
       _shopNameController.text = map['shop_name'] ?? 'Ahmadia Shop';
-      _addressController.text = map['shop_address'] ?? '';
-      _phoneController.text = map['shop_phone'] ?? '';
+      // ফাঁকা থাকলে ডিফল্ট ঠিকানা/ফোন দেখায় (সংরক্ষণ করলে এটাই সেভ হয়)
+      final savedAddress = (map['shop_address'] ?? '').trim();
+      final savedPhone = (map['shop_phone'] ?? '').trim();
+      _addressController.text =
+          savedAddress.isEmpty ? ShopDefaults.address : savedAddress;
+      _phoneController.text = savedPhone.isEmpty ? ShopDefaults.phone : savedPhone;
       _logoPath = map['shop_logo_path']?.isNotEmpty == true ? map['shop_logo_path'] : null;
       _loading = false;
     });

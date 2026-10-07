@@ -39,6 +39,35 @@ class MergeService {
     final report = MergeReport();
 
     try {
+      // নিরাপত্তা-চেক: দুই ডেটাবেসে একই (sync_id) স্টক-ব্যাচ আছে অথচ দুই জায়গায় তার
+      // বাকি-পরিমাণ আলাদা — মানে একই ব্যাকআপ থেকে শুরু করে দুই ডিভাইসেই একই মাল বিক্রি/ব্যবহার
+      // হয়েছে। এই অবস্থায় মার্জ করলে স্টক ও হিসাব ভুল হয় (টেস্টে ২৪ হাজার টাকার গরমিল),
+      // তাই মার্জ না করে সম্পূর্ণ রিস্টোর করতে বলা হয়।
+      final localBatchRows = await localDb
+          .query('purchase_batches', columns: ['sync_id', 'remaining_quantity']);
+      final localRemaining = <String, double>{
+        for (final r in localBatchRows)
+          if (r['sync_id'] != null)
+            r['sync_id'] as String: (r['remaining_quantity'] as num).toDouble()
+      };
+      final secondaryBatchRows = await secondaryDb
+          .query('purchase_batches', columns: ['sync_id', 'remaining_quantity']);
+      var conflictingBatches = 0;
+      for (final r in secondaryBatchRows) {
+        final syncId = r['sync_id'] as String?;
+        if (syncId == null) continue;
+        final local = localRemaining[syncId];
+        if (local == null) continue;
+        final other = (r['remaining_quantity'] as num).toDouble();
+        if ((other - local).abs() > 0.0005) conflictingBatches++;
+      }
+      if (conflictingBatches > 0) {
+        throw Exception(
+            'এই দুই ডেটাবেস একই ব্যাকআপ থেকে শুরু হয়ে আলাদাভাবে বদলেছে ($conflictingBatches টি স্টক-ব্যাচে '
+            'গরমিল) — মার্জ করলে স্টক ও হিসাব ভুল হতো, তাই কিছু বদলানো হয়নি। '
+            'বদলে এক ডিভাইসের ব্যাকআপ অন্যটায় "রিস্টোর" করুন।');
+      }
+
       await localDb.transaction((txn) async {
         // --- ধাপ ১: মাস্টার ডেটা (ক্যাটাগরি, পণ্য, সাপ্লায়ার, কাস্টমার) ---
         final categoryIdMap = await _mergeSimpleTable(

@@ -33,7 +33,20 @@ class _PurchaseItemRow {
   ProductUnit? selectedUnit;
   List<ProductUnit> availableUnits = [];
   double quantity = 0; // নির্বাচিত unit-এ (pack হলে pack-সংখ্যা)
-  double unitCost = 0; // নির্বাচিত unit-এর প্রতি এককের দাম
+  double unitCost = 0; // নির্বাচিত unit-এর প্রতি এককের দাম (সেভ ও হিসাব এটা দিয়েই)
+  // ঘরে লেখা সংখ্যা: priceIsPerBase হলে প্রতি base unit (যেমন কেজি) দাম, নাহলে প্রতি
+  // নির্বাচিত unit-এর দাম। unitCost এটা থেকে স্বয়ংক্রিয় হিসাব হয়।
+  double priceInput = 0;
+  bool priceIsPerBase = false;
+  final TextEditingController unitCostController = TextEditingController();
+
+  double get conversionFactor => selectedUnit?.conversionFactorToBase ?? 1;
+
+  void recomputePrice() {
+    unitCost = (selectedUnit != null && priceIsPerBase)
+        ? ((priceInput * conversionFactor) * 1000000).round() / 1000000
+        : priceInput;
+  }
 
   String get displayUnitLabel => selectedUnit?.unitLabel ?? baseUnit;
 }
@@ -127,7 +140,9 @@ class _PurchaseEntryScreenState extends State<PurchaseEntryScreen> {
         ..selectedUnit = selectedUnit
         ..availableUnits = availableUnits
         ..quantity = displayQty
-        ..unitCost = displayUnitCost);
+        ..unitCost = displayUnitCost
+        ..priceInput = displayUnitCost
+        ..unitCostController.text = _formatPrice(displayUnitCost));
     }
 
     if (!mounted) return;
@@ -157,6 +172,18 @@ class _PurchaseEntryScreenState extends State<PurchaseEntryScreen> {
 
   void _removeItemRow(int index) {
     setState(() => _items.removeAt(index));
+  }
+
+  String _formatPrice(double price) => price == price.roundToDouble()
+      ? price.toInt().toString()
+      : price.toString();
+
+  double _round6(double v) => (v * 1000000).round() / 1000000;
+
+  void _showPrice(_PurchaseItemRow item) {
+    item.recomputePrice();
+    item.unitCostController.text =
+        item.priceInput > 0 ? _formatPrice(item.priceInput) : '';
   }
 
   // Phase 1 (multi-unit): product বেছে নেওয়া হলে তার pack unit-গুলো লোড করা
@@ -278,6 +305,8 @@ class _PurchaseEntryScreenState extends State<PurchaseEntryScreen> {
                         item.baseUnit = product['unit'] as String;
                         item.selectedUnit = null;
                         item.availableUnits = [];
+                        item.priceIsPerBase = false;
+                        item.recomputePrice();
                       });
                       _loadUnitsForRow(item, val as int);
                     },
@@ -306,7 +335,22 @@ class _PurchaseEntryScreenState extends State<PurchaseEntryScreen> {
                         child: Text('${u.unitLabel} (= ${u.conversionFactorToBase} ${item.baseUnit})'),
                       )),
                 ],
-                onChanged: (u) => setState(() => item.selectedUnit = u),
+                onChanged: (u) {
+                  setState(() {
+                    // ক্রয়মূল্যের "প্রতি base unit" মান ধরে রাখা — unit বদলালে দাম নিজে
+                    // থেকে রূপান্তর হয় (যেমন কেজি ৳১০০ → গ্রাম ৳০.১)
+                    final oldFactor = item.conversionFactor;
+                    final perBase = oldFactor > 0 ? item.unitCost / oldFactor : 0.0;
+                    item.selectedUnit = u;
+                    item.priceIsPerBase = u != null && u.conversionFactorToBase < 1;
+                    if (perBase > 0) {
+                      item.priceInput = (u == null || item.priceIsPerBase)
+                          ? _round6(perBase)
+                          : _round6(perBase * item.conversionFactor);
+                    }
+                    _showPrice(item);
+                  });
+                },
               ),
             ],
             const SizedBox(height: 8),
@@ -324,15 +368,48 @@ class _PurchaseEntryScreenState extends State<PurchaseEntryScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: TextFormField(
+                    controller: item.unitCostController,
                     keyboardType: TextInputType.number,
                     decoration: InputDecoration(
-                        labelText: 'প্রতি ${item.displayUnitLabel} ক্রয়মূল্য'),
-                    onChanged: (val) =>
-                        setState(() => item.unitCost = double.tryParse(val) ?? 0),
+                        labelText:
+                            'প্রতি ${item.priceIsPerBase ? item.baseUnit : item.displayUnitLabel} ক্রয়মূল্য'),
+                    onChanged: (val) => setState(() {
+                      item.priceInput = double.tryParse(val) ?? 0;
+                      item.recomputePrice();
+                    }),
                   ),
                 ),
               ],
             ),
+            if (item.selectedUnit != null && item.conversionFactor != 1) ...[
+              const SizedBox(height: 8),
+              SegmentedButton<bool>(
+                segments: [
+                  ButtonSegment(
+                      value: false, label: Text('প্রতি ${item.displayUnitLabel}')),
+                  ButtonSegment(value: true, label: Text('প্রতি ${item.baseUnit}')),
+                ],
+                selected: {item.priceIsPerBase},
+                onSelectionChanged: (s) => setState(() {
+                  final toBase = s.first;
+                  if (toBase == item.priceIsPerBase) return;
+                  final f = item.conversionFactor;
+                  item.priceInput =
+                      _round6(toBase ? item.priceInput / f : item.priceInput * f);
+                  item.priceIsPerBase = toBase;
+                  _showPrice(item);
+                }),
+              ),
+              if (item.unitCost > 0)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                      'প্রতি ${item.displayUnitLabel}: ৳${_formatPrice(_round6(item.unitCost))}'
+                      '  •  প্রতি ${item.baseUnit}: ৳${_formatPrice(_round6(item.unitCost / item.conversionFactor))}',
+                      style: const TextStyle(
+                          fontSize: 12, color: AppColors.textSecondary)),
+                ),
+            ],
             if (item.quantity > 0 && item.unitCost > 0) ...[
               const SizedBox(height: 8),
               Align(

@@ -33,7 +33,7 @@ class TxnItemLine {
   }
 
   String get quantityText => '${_num(quantity)} $unit';
-  String get rateText => '৳${_num(rate, maxDecimals: 2)}';
+  String get rateText => '৳${_num(rate, maxDecimals: 4)}';
   String get totalText => '৳${_num(total, maxDecimals: 2)}';
 
   /// যেমন: "চিনি — 5 কেজি × ৳75 = ৳375"
